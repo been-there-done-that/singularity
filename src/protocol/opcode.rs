@@ -98,6 +98,21 @@ impl From<String> for Opcode {
     }
 }
 
+/// Reserved: Create a new Model.
+pub const SCHEMA_CREATE_MODEL: &str = "schema.create_model";
+/// Reserved: Add a Field to a Model.
+pub const SCHEMA_ADD_FIELD: &str = "schema.add_field";
+/// Reserved: Remove a Field from a Model.
+pub const SCHEMA_DROP_FIELD: &str = "schema.drop_field";
+/// Reserved: Rename a Model.
+pub const SCHEMA_RENAME_MODEL: &str = "schema.rename_model";
+/// Reserved: Rename a Field.
+pub const SCHEMA_RENAME_FIELD: &str = "schema.rename_field";
+/// Reserved: Attach a Folder.
+pub const SCHEMA_ATTACH_FOLDER: &str = "schema.attach_folder";
+/// Reserved: Detach a Folder.
+pub const SCHEMA_DETACH_FOLDER: &str = "schema.detach_folder";
+
 #[cfg(test)]
 mod tests {
     use super::*;
