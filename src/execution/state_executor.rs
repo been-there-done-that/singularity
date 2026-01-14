@@ -12,7 +12,6 @@
 //! - No write field widening
 //! - No backend-specific logic in execution
 
-use crate::protocol::FieldSet;
 use crate::state::{State, StateError};
 
 use super::context::{ExecutionContext, ExecutionMeta, ExecutionTarget};
@@ -157,7 +156,7 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
 mod tests {
     use super::*;
     use crate::capability::{CapabilitySigner, CapabilityVerifier, SigningKey};
-    use crate::protocol::{CapabilityPayload, Resource};
+    use crate::protocol::{CapabilityPayload, FieldSet, Resource};
     use crate::state::SqliteState;
     use serde_json::json;
 
