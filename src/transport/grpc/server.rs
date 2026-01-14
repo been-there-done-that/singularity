@@ -47,6 +47,7 @@ impl From<TransportError> for Status {
                 crate::state::StateError::NotFound { .. } => Status::not_found(e.to_string()),
                 crate::state::StateError::ConstraintViolation { .. } => Status::failed_precondition(e.to_string()),
                 crate::state::StateError::CapabilityNotSupported(_) => Status::unimplemented(e.to_string()),
+                crate::state::StateError::BadRequest(msg) => Status::invalid_argument(msg),
                 _ => Status::internal(e.to_string()),
             },
         }

@@ -66,11 +66,13 @@ impl IntoResponse for TransportError {
                 ExecutionError::OperationNotSupported(_) => {
                     (StatusCode::BAD_REQUEST, e.to_string())
                 }
+                ExecutionError::BadRequest(_) => (StatusCode::BAD_REQUEST, e.to_string()),
             },
             TransportError::State(e) => match e {
                 StateError::NotFound { .. } => (StatusCode::NOT_FOUND, e.to_string()),
                 StateError::ConstraintViolation { .. } => (StatusCode::CONFLICT, e.to_string()),
                 StateError::CapabilityNotSupported(_) => (StatusCode::NOT_IMPLEMENTED, e.to_string()),
+                StateError::BadRequest(_) => (StatusCode::BAD_REQUEST, e.to_string()),
                 StateError::ConnectionError(_) | StateError::InternalError(_) => {
                     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
                 }
