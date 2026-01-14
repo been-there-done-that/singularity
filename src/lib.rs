@@ -25,4 +25,5 @@
 //! - [`protocol::OpExecute`] - Execution request (requires valid capability)
 
 pub mod capability;
+pub mod execution;
 pub mod protocol;
