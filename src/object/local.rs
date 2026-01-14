@@ -14,21 +14,58 @@ impl LocalFsStore {
         if !root.exists() {
             fs::create_dir_all(&root).map_err(ObjectError::IoError)?;
         }
+        let root = root.canonicalize().map_err(ObjectError::IoError)?;
         Ok(Self { root })
     }
 
-    /// Securely resolve path relative to root, preventing transversal
+    /// Securely resolve path relative to root, preventing traversal.
+    ///
+    /// The ObjectStore MUST NEVER trust a path string.
+    /// All paths must be:
+    /// 1. Normalized
+    /// 2. Resolved against a fixed root
+    /// 3. Rejected if they escape that root
     fn resolve_path(&self, path: &str) -> Result<PathBuf, ObjectError> {
-        // Basic sanitization: prevent '..'
-        if path.contains("..") {
-            return Err(ObjectError::InvalidPath("Path cannot contain '..'".to_string()));
+        // 1. Reject absolute paths early
+        if Path::new(path).is_absolute() {
+             return Err(ObjectError::InvalidPath("Absolute paths not allowed".to_string()));
         }
         
-        // Remove leading slashes
-        let clean_path = path.trim_start_matches('/');
-        let full_path = self.root.join(clean_path);
+        // 2. Reject '..' components for simplicity and security 
+        // (S3 keys are flat strings, '..' usually indicates attack or mistake)
+        if path.split('/').any(|c| c == "..") {
+             return Err(ObjectError::InvalidPath("Path cannot contain '..'".to_string()));
+        }
+
+        // 3. Join and normalize
+        // We use component-based resolution to avoid checking file existence for writes
+        let mut full_path = self.root.clone();
+        for component in Path::new(path).components() {
+            match component {
+                std::path::Component::Normal(c) => full_path.push(c),
+                std::path::Component::CurDir => {}, // skip .
+                std::path::Component::ParentDir => return Err(ObjectError::PathTraversalDetected),
+                _ => return Err(ObjectError::InvalidPath("Invalid path component".to_string())),
+            }
+        }
         
-        Ok(full_path)
+        // 4. Enforce root containment (double check)
+        // Note: fs::canonicalize requires file existence, so we use it only if verified
+        // For strictness, if the path exists, we verify canonical match.
+        if full_path.exists() {
+             let canonical = full_path.canonicalize().map_err(ObjectError::IoError)?;
+             let root_canonical = self.root.canonicalize().map_err(ObjectError::IoError)?;
+             if !canonical.starts_with(&root_canonical) {
+                 return Err(ObjectError::PathTraversalDetected);
+             }
+             Ok(canonical)
+        } else {
+             // If it doesn't exist (e.g. new file write), we trust the component logic + check starts_with
+             if !full_path.starts_with(&self.root) {
+                 return Err(ObjectError::PathTraversalDetected);
+             }
+             Ok(full_path)
+        }
     }
 }
 
@@ -119,5 +156,41 @@ impl ObjectStore for LocalFsStore {
         }
         
         Ok(entries)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_resolve_path_security() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = LocalFsStore::new(temp_dir.path().to_str().unwrap()).unwrap();
+
+        // Valid paths
+        assert!(store.resolve_path("file.txt").is_ok());
+        assert!(store.resolve_path("folder/file.txt").is_ok());
+
+        // Traversal attempts
+        // Standard ..
+        match store.resolve_path("../secret.txt") {
+            Err(ObjectError::InvalidPath(_)) => {},
+            res => panic!("Expected InvalidPath, got {:?}", res),
+        }
+
+        // Nested ..
+        match store.resolve_path("folder/../secret.txt") {
+             Err(ObjectError::InvalidPath(_)) | Err(ObjectError::PathTraversalDetected) => {},
+             res => panic!("Expected PathTraversalDetected or InvalidPath, got {:?}", res),
+        }
+
+        // Absolute path
+        match store.resolve_path("/etc/passwd") {
+            Err(ObjectError::InvalidPath(_)) => {},
+            res => panic!("Expected InvalidPath for absolute path, got {:?}", res),
+        }
     }
 }

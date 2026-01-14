@@ -33,3 +33,4 @@ tonic-build = "0.10"
 
 [dev-dependencies]
 tokio-stream = { version = "0.1", features = ["net"] }
+tempfile = "3.10"

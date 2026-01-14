@@ -13,6 +13,8 @@ pub enum ObjectError {
     IoError(#[from] io::Error),
     #[error("Invalid path: {0}")]
     InvalidPath(String),
+    #[error("Path traversal detected")]
+    PathTraversalDetected,
 }
 
 #[derive(Debug, Clone)]
