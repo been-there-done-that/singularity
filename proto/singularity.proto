@@ -1,0 +1,46 @@
+syntax = "proto3";
+package singularity;
+
+import "google/protobuf/struct.proto";
+
+service Singularity {
+  // Intent declaration: Get a capability token.
+  rpc Request (OpRequestProto) returns (CapGrantProto);
+  
+  // Execution: Use a capability token to mutate state.
+  rpc Execute (OpExecuteProto) returns (ExecutionResultProto);
+}
+
+message OpRequestProto {
+  string request_id = 1;
+  string op = 2;
+  ResourceProto resource = 3;
+  google.protobuf.Struct input = 4;
+}
+
+message ResourceProto {
+  string type = 1; // "resource_type" in kernel
+  optional string id = 2; // "resource_id"
+}
+
+message CapGrantProto {
+  string request_id = 1;
+  // Opaque capability token. Do NOT inspect or modify.
+  string token = 2;
+  uint64 expires_at = 3;
+}
+
+message OpExecuteProto {
+  string execute_id = 1;
+  string token = 2;
+  google.protobuf.Struct payload = 3;
+}
+
+message ExecutionResultProto {
+  oneof result {
+    // Read operation result
+    google.protobuf.Struct data = 1;
+    // Write operation result
+    uint64 rows_affected = 2;
+  }
+}
