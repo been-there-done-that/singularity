@@ -10,6 +10,7 @@ use thiserror::Error;
 
 use crate::execution::ExecutionError;
 use crate::identity::IdentityError;
+use crate::state::StateError;
 
 /// Errors that can occur at the transport layer.
 #[derive(Debug, Error)]
@@ -37,6 +38,10 @@ pub enum TransportError {
     /// Bad request (400).
     #[error("bad request: {0}")]
     BadRequest(String),
+
+    /// State error.
+    #[error("state error: {0}")]
+    State(#[from] StateError),
 }
 
 impl IntoResponse for TransportError {
@@ -60,6 +65,14 @@ impl IntoResponse for TransportError {
                 ExecutionError::StorageError(_) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
                 ExecutionError::OperationNotSupported(_) => {
                     (StatusCode::BAD_REQUEST, e.to_string())
+                }
+            },
+            TransportError::State(e) => match e {
+                StateError::NotFound { .. } => (StatusCode::NOT_FOUND, e.to_string()),
+                StateError::ConstraintViolation { .. } => (StatusCode::CONFLICT, e.to_string()),
+                StateError::CapabilityNotSupported(_) => (StatusCode::NOT_IMPLEMENTED, e.to_string()),
+                StateError::ConnectionError(_) | StateError::InternalError(_) => {
+                    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
                 }
             },
         };
