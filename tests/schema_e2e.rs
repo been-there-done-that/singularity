@@ -13,11 +13,15 @@ fn setup() -> (SqliteState, SigningKey) {
 }
 
 fn create_context(op: &str, resource: Resource) -> ExecutionContext {
+    create_context_with_user(op, resource, "test-user-uuid")
+}
+
+fn create_context_with_user(op: &str, resource: Resource, user_id: &str) -> ExecutionContext {
     let signing_key = SigningKey::generate();
     let signer = CapabilitySigner::new(signing_key);
     let verifier = CapabilityVerifier::new(signer.verifying_key());
     let payload = CapabilityPayload::new("test", op, resource, FieldSet::all(), 0, 60)
-        .with_internal_user_id("test-user-uuid");
+        .with_internal_user_id(user_id);
     let token = signer.mint(&payload).unwrap();
     let verified = verifier.verify(&token, 30).unwrap();
     ExecutionContext::new(verified)
@@ -153,4 +157,77 @@ fn test_schema_persistence_flow() {
     let err = executor.execute(&ctx_write_invalid, &ExecutionTarget::new(Resource::instance("users", "invalid_user")), &meta, Some(invalid_payload));
     
     assert!(err.is_err(), "Should fail to write string to integer column in STRICT table");
+}
+
+#[test]
+fn test_schema_introspection_access_control() {
+    let (state, _) = setup();
+    let executor = StateBackedExecutor::new(&state);
+    let meta = ExecutionMeta::new();
+
+    let user_a = "user-a-uuid";
+    let user_b = "user-b-uuid";
+
+    // 1. User A creates "model_a"
+    let model_id = "m_model_a";
+    let create_op = "schema.create_model";
+    let target_res = Resource::instance("__models", model_id);
+    let ctx_a_create = create_context_with_user(create_op, target_res.clone(), user_a);
+    let target = ExecutionTarget::new(target_res);
+    
+    let model_payload = json!({
+        "name": "model_a",
+        "namespace": "public",
+        "created_at": 100
+    });
+
+    executor.execute(&ctx_a_create, &target, &meta, Some(model_payload)).expect("User A create model failed");
+
+    // 2. User A lists models -> Should see "model_a"
+    let list_op = "schema.list_models";
+    let list_res = Resource::collection("__models");
+    let ctx_a_list = create_context_with_user(list_op, list_res.clone(), user_a);
+    let target_list = ExecutionTarget::new(list_res);
+
+    let result_a = executor.execute(&ctx_a_list, &target_list, &meta, None).expect("User A list failed");
+    
+    if let singularity::execution::ExecutionResult::Read { data } = result_a {
+        let list = data.as_array().expect("result should be array");
+        assert!(list.iter().any(|m| m["id"] == model_id), "User A should see model_a");
+        assert!(list.iter().any(|m| m["owner_id"] == user_a), "Model should have owner_id");
+    } else {
+        panic!("expected read result");
+    }
+
+    // 3. User B lists models -> Should NOT see "model_a" (Empty list or filtered)
+    let ctx_b_list = create_context_with_user(list_op, Resource::collection("__models"), user_b);
+    let result_b = executor.execute(&ctx_b_list, &target_list, &meta, None).expect("User B list failed");
+
+    if let singularity::execution::ExecutionResult::Read { data } = result_b {
+        let list = data.as_array().expect("result should be array");
+        assert!(!list.iter().any(|m| m["id"] == model_id), "User B should NOT see model_a");
+        assert_eq!(list.len(), 0, "User B owns nothing, should see nothing");
+    } else {
+        panic!("expected read result");
+    }
+
+    // 4. User B tries to READ "model_a" directly -> Should be NOT FOUND (due to RLS)
+    let read_op = "resource.read";
+    let ctx_b_read = create_context_with_user(read_op, Resource::instance("__models", model_id), user_b);
+    let target_read = ExecutionTarget::new(Resource::instance("__models", model_id));
+
+    let result_b_read = executor.execute(&ctx_b_read, &target_read, &meta, None);
+    
+    match result_b_read {
+        Err(singularity::execution::ExecutionError::ResourceNotFound { .. }) => {
+            // Success: Not Found (masked)
+        },
+        Ok(_) => panic!("User B should not be able to read model_a"),
+        Err(e) => panic!("Unexpected error: {:?}", e),
+    }
+
+    // 5. User A reads "model_a" -> Success
+    let ctx_a_read = create_context_with_user(read_op, Resource::instance("__models", model_id), user_a);
+    let result_a_read = executor.execute(&ctx_a_read, &target_read, &meta, None);
+    assert!(result_a_read.is_ok(), "User A should read model_a");
 }

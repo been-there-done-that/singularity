@@ -85,11 +85,24 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
 
         match op {
             // READ operations
-            "resource.read" | "user.read" | "document.read" => {
+            "resource.read" | "user.read" | "document.read" | 
+            "schema.list_models" => {
+                // automatic owner filtering for strict mode
+                let mut exec_constraints = serde_json::Map::new();
+                if let Some(user_id) = ctx.internal_user_id() {
+                     exec_constraints.insert("owner_id".to_string(), serde_json::json!(user_id));
+                }
+                // Merge with explicit constraints if any (future proofing)
+                let c_val = if !exec_constraints.is_empty() {
+                    Some(serde_json::Value::Object(exec_constraints))
+                } else {
+                    None
+                };
+
                 let data = self.state.read(
                     target,
                     ctx.fields(),
-                    constraints.as_ref(),
+                    c_val.as_ref(), // Passed combined constraints
                 )?;
 
                 // 6. Filter output to authorized fields

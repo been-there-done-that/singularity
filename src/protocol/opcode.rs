@@ -112,6 +112,8 @@ pub const SCHEMA_RENAME_FIELD: &str = "schema.rename_field";
 pub const SCHEMA_ATTACH_FOLDER: &str = "schema.attach_folder";
 /// Reserved: Detach a Folder.
 pub const SCHEMA_DETACH_FOLDER: &str = "schema.detach_folder";
+/// Reserved: List Models.
+pub const SCHEMA_LIST_MODELS: &str = "schema.list_models";
 
 #[cfg(test)]
 mod tests {

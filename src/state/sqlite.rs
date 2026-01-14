@@ -175,51 +175,12 @@ impl SqliteState {
     }
 
     /// Read internal tables.
-    fn read_internal(&self, resource_type: &str, id: &str) -> Result<Value, StateError> {
+    fn read_internal(&self, resource_type: &str, id: Option<&str>, constraints: Option<&Value>) -> Result<Value, StateError> {
         let conn = self.conn.lock().unwrap();
         match resource_type {
-            "__models" => {
-                let mut stmt = conn.prepare("SELECT id, name, namespace, created_at FROM __models WHERE id = ?1")
-                    .map_err(|e| StateError::InternalError(e.to_string()))?;
-                let mut rows = stmt.query(params![id])
-                    .map_err(|e| StateError::InternalError(e.to_string()))?;
-                
-                if let Some(row) = rows.next().map_err(|e| StateError::InternalError(e.to_string()))? {
-                    // Fetch fields
-                    let mut fields_stmt = conn.prepare("SELECT id, name, field_type, required, unique_flag, default_val, created_at FROM __fields WHERE model_id = ?1")
-                        .map_err(|e| StateError::InternalError(e.to_string()))?;
-                    let fields_iter = fields_stmt.query_map(params![id], |row| {
-                        let f_type_str: String = row.get(2)?;
-                        let default_str: Option<String> = row.get(5)?;
-                        
-                        Ok(json!({
-                            "id": row.get::<_, String>(0)?,
-                            "name": row.get::<_, String>(1)?,
-                            "field_type": serde_json::from_str::<Value>(&f_type_str).unwrap_or(Value::Null),
-                            "required": row.get::<_, i64>(3)? != 0,
-                            "unique": row.get::<_, i64>(4)? != 0,
-                            "default": default_str.map(|s| serde_json::from_str::<Value>(&s).unwrap_or(Value::Null)),
-                            "created_at": row.get::<_, i64>(6)?,
-                        }))
-                    }).map_err(|e| StateError::InternalError(e.to_string()))?;
-
-                    let fields: Vec<Value> = fields_iter.filter_map(Result::ok).collect();
-
-                    Ok(json!({
-                        "id": row.get::<_, String>(0).unwrap(),
-                        "name": row.get::<_, String>(1).unwrap(),
-                        "namespace": row.get::<_, String>(2).unwrap(),
-                        "created_at": row.get::<_, i64>(3).unwrap(),
-                        "fields": fields
-                    }))
-                } else {
-                    Err(StateError::NotFound {
-                        resource_type: resource_type.to_string(),
-                        resource_id: id.to_string(),
-                    })
-                }
-            },
+            "__models" => self.read_internal_models(&conn, id, constraints),
             "__fields" => {
+                let id = id.ok_or(StateError::BadRequest("collection read not supported for __fields".into()))?;
                 let mut stmt = conn.prepare("SELECT id, model_id, name, field_type, required, unique_flag, default_val, created_at FROM __fields WHERE id = ?1")
                    .map_err(|e| StateError::InternalError(e.to_string()))?;
                 if let Some(row) = stmt.query_row(params![id], |row| {
@@ -245,6 +206,7 @@ impl SqliteState {
                 }
             },
             "__internal_users" => {
+                let id = id.ok_or(StateError::BadRequest("collection read not supported for __internal_users".into()))?;
                 let mut stmt = conn.prepare("SELECT id, external_subject, roles, status, created_at FROM __internal_users WHERE id = ?1")
                     .map_err(|e| StateError::InternalError(e.to_string()))?;
                 if let Some(row) = stmt.query_row(params![id], |row| {
@@ -267,8 +229,128 @@ impl SqliteState {
             },
             _ => Err(StateError::NotFound {
                  resource_type: resource_type.to_string(),
-                 resource_id: id.to_string(),
+                 resource_id: id.unwrap_or("collection").to_string(),
             }),
+        }
+    }
+
+    fn read_internal_models(&self, conn: &rusqlite::Connection, id: Option<&str>, constraints: Option<&Value>) -> Result<Value, StateError> {
+        if let Some(model_id) = id {
+            // Instance Read
+             let mut stmt = conn.prepare("SELECT id, name, namespace, created_at, owner_id FROM __models WHERE id = ?1")
+                    .map_err(|e| StateError::InternalError(e.to_string()))?;
+                let mut rows = stmt.query(params![model_id])
+                    .map_err(|e| StateError::InternalError(e.to_string()))?;
+                
+                if let Some(row) = rows.next().map_err(|e| StateError::InternalError(e.to_string()))? {
+                    // Check ownership constraint if present?
+                    let owner: Option<String> = row.get(4).unwrap_or(None);
+                    // Standard constraint checking mechanism usually happens via SQL.
+                    // For now, we manually check if "owner_id" constraint is present.
+                    if let Some(c) = constraints {
+                        if let Some(req_owner) = c.get("owner_id").and_then(|v| v.as_str()) {
+                             // System models (None owner) are visible to all? Or strict?
+                             // Strict: You see only what you own. None owner = System.
+                             // If I request my models, I shouldn't see system models?
+                             // Or should I see system models too?
+                             // "You can only see models YOU own"
+                             if let Some(actual) = &owner {
+                                 if actual != req_owner {
+                                     return Err(StateError::NotFound { resource_type: "__models".into(), resource_id: model_id.into() });
+                                 }
+                             } else {
+                                 // System model. Allow read? 
+                                 // "Admin bypass" usually handled by not passing constraint?
+                                 // Or by policy. If constraint is passed, it implies filtering.
+                                 // Let's assume strict filtering: If constraint is owner_id=X, then only models owned by X.
+                                 return Err(StateError::NotFound { resource_type: "__models".into(), resource_id: model_id.into() });
+                             }
+                        }
+                    }
+
+                    // Fetch fields
+                    let mut fields_stmt = conn.prepare("SELECT id, name, field_type, required, unique_flag, default_val, created_at FROM __fields WHERE model_id = ?1")
+                        .map_err(|e| StateError::InternalError(e.to_string()))?;
+                    let fields_iter = fields_stmt.query_map(params![model_id], |row| {
+                        let f_type_str: String = row.get(2)?;
+                        let default_str: Option<String> = row.get(5)?;
+                        
+                        Ok(json!({
+                            "id": row.get::<_, String>(0)?,
+                            "name": row.get::<_, String>(1)?,
+                            "field_type": serde_json::from_str::<Value>(&f_type_str).unwrap_or(Value::Null),
+                            "required": row.get::<_, i64>(3)? != 0,
+                            "unique": row.get::<_, i64>(4)? != 0,
+                            "default": default_str.map(|s| serde_json::from_str::<Value>(&s).unwrap_or(Value::Null)),
+                            "created_at": row.get::<_, i64>(6)?,
+                        }))
+                    }).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+                    let fields: Vec<Value> = fields_iter.filter_map(Result::ok).collect();
+
+                    Ok(json!({
+                        "id": row.get::<_, String>(0).unwrap(),
+                        "name": row.get::<_, String>(1).unwrap(),
+                        "namespace": row.get::<_, String>(2).unwrap(),
+                        "created_at": row.get::<_, i64>(3).unwrap(),
+                        "owner_id": owner.unwrap_or_else(|| "system".to_string()),
+                        "fields": fields
+                    }))
+                } else {
+                    Err(StateError::NotFound {
+                        resource_type: "__models".to_string(),
+                        resource_id: model_id.to_string(),
+                    })
+                }
+        } else {
+            // Collection Read
+            let mut sql = "SELECT id, name, namespace, created_at, owner_id FROM __models".to_string();
+            let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+            if let Some(c) = constraints {
+                if let Some(req_owner) = c.get("owner_id").and_then(|v| v.as_str()) {
+                    sql.push_str(" WHERE owner_id = ?1");
+                    params_vec.push(Box::new(req_owner.to_string()));
+                }
+            }
+            
+            let mut stmt = conn.prepare(&sql).map_err(|e| StateError::InternalError(e.to_string()))?;
+            
+            // We need to convert to params slice.
+            // Since we have max 1 param, let's simplify.
+            
+            let map_fn = |row: &rusqlite::Row| -> rusqlite::Result<(String, String, String, i64, Option<String>)> {
+                 Ok((
+                    row.get(0)?, 
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?
+                ))
+            };
+
+            let rows_result = if params_vec.is_empty() {
+                stmt.query_map([], map_fn)
+            } else {
+                 stmt.query_map(params![params_vec[0]], map_fn)
+            };
+
+            let rows = rows_result.map_err(|e| StateError::InternalError(e.to_string()))?;
+            
+            let mut models = Vec::new();
+            for r in rows {
+                if let Ok((id, name, namespace, created_at, owner)) = r {
+                    models.push(json!({
+                        "id": id,
+                        "name": name,
+                        "namespace": namespace,
+                        "created_at": created_at,
+                        "owner_id": owner.unwrap_or_else(|| "system".to_string()),
+                    }));
+                }
+            }
+            
+            Ok(json!(models)) 
         }
     }
 
@@ -279,11 +361,12 @@ impl SqliteState {
                 let name = data["name"].as_str().ok_or(StateError::BadRequest("missing name".to_string()))?;
                 let namespace = data["namespace"].as_str().unwrap_or("public");
                 let created_at = data["created_at"].as_i64().unwrap_or(0); // Should be set by caller
-                
+                let owner_id = data["owner_id"].as_str(); // Optional owner
+
                 conn.execute(
-                    "INSERT INTO __models (id, name, namespace, created_at) VALUES (?1, ?2, ?3, ?4)
-                     ON CONFLICT(id) DO UPDATE SET name=excluded.name, namespace=excluded.namespace",
-                    params![id, name, namespace, created_at],
+                    "INSERT INTO __models (id, name, namespace, created_at, owner_id) VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(id) DO UPDATE SET name=excluded.name, namespace=excluded.namespace, owner_id=excluded.owner_id",
+                    params![id, name, namespace, created_at, owner_id],
                 ).map_err(|e| StateError::InternalError(e.to_string()))?;
                 
                 // Create physical table
@@ -469,7 +552,7 @@ impl State for SqliteState {
             Some(id) => {
                 // Instance read
                 if resource_type.starts_with("__") {
-                    return self.read_internal(&resource_type, &id);
+                    return self.read_internal(&resource_type, Some(&id), constraints);
                 }
 
                 let conn = self.conn.lock().unwrap();
@@ -566,6 +649,10 @@ impl State for SqliteState {
                 }
             }
             None => {
+                if resource_type.starts_with("__") {
+                     return self.read_internal(&resource_type, None, constraints);
+                }
+
                 let conn = self.conn.lock().unwrap();
                 // Collection read
                 let mut stmt = conn.prepare(
