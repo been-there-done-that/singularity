@@ -30,5 +30,6 @@ pub mod identity;
 pub mod migration;
 pub mod policy;
 pub mod protocol;
+pub mod schema;
 pub mod state;
 pub mod transport;
