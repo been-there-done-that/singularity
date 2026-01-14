@@ -1,1 +1,56 @@
 @import 'tailwindcss';
+
+/* Dark theme base */
+:root {
+	color-scheme: dark;
+}
+
+html {
+	@apply bg-zinc-950 text-zinc-100 antialiased;
+}
+
+body {
+	@apply min-h-screen;
+}
+
+/* Custom scrollbar for dark theme */
+::-webkit-scrollbar {
+	@apply w-2 h-2;
+}
+
+::-webkit-scrollbar-track {
+	@apply bg-zinc-900;
+}
+
+::-webkit-scrollbar-thumb {
+	@apply bg-zinc-700 rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+	@apply bg-zinc-600;
+}
+
+/* Animation utilities */
+@keyframes slide-in-from-right {
+	from {
+		transform: translateX(100%);
+		opacity: 0;
+	}
+	to {
+		transform: translateX(0);
+		opacity: 1;
+	}
+}
+
+.animate-in {
+	animation-fill-mode: both;
+}
+
+.slide-in-from-right-5 {
+	animation: slide-in-from-right 0.3s ease-out;
+}
+
+/* Focus styles */
+*:focus-visible {
+	@apply outline-none ring-2 ring-indigo-500 ring-offset-2 ring-offset-zinc-900;
+}
