@@ -102,6 +102,10 @@ pub trait State: Send + Sync {
         constraints: Option<&serde_json::Value>,
     ) -> Result<u64, StateError>;
 
+    /// Execute internal DDL (migrations).
+    /// Safe only because it is internal.
+    fn execute_ddl(&self, sql: &str) -> Result<(), StateError>;
+
     /// Get the capabilities of this state backend.
     fn capabilities(&self) -> &StateCapabilities;
 }
