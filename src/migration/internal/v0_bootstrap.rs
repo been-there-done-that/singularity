@@ -28,15 +28,6 @@ impl InternalMigration for V0Bootstrap {
             );
         ").map_err(|e| TransportError::Internal(e.to_string()))?;
 
-        // __models (Registry of user tables)
-        state.execute_ddl("
-            CREATE TABLE IF NOT EXISTS __models (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE,
-                schema_json TEXT NOT NULL,
-                created_at INTEGER NOT NULL
-            );
-        ").map_err(|e| TransportError::Internal(e.to_string()))?;
 
         // __internal_users (Anchor for identity)
         state.execute_ddl("
