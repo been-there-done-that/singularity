@@ -43,6 +43,12 @@ impl From<TransportError> for Status {
                 crate::execution::ExecutionError::OperationNotSupported(_) => Status::invalid_argument(e.to_string()),
                 _ => Status::internal(e.to_string()),
             },
+            TransportError::State(e) => match e {
+                crate::state::StateError::NotFound { .. } => Status::not_found(e.to_string()),
+                crate::state::StateError::ConstraintViolation { .. } => Status::failed_precondition(e.to_string()),
+                crate::state::StateError::CapabilityNotSupported(_) => Status::unimplemented(e.to_string()),
+                _ => Status::internal(e.to_string()),
+            },
         }
     }
 }
