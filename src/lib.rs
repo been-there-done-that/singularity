@@ -24,4 +24,5 @@
 //! - [`protocol::CapGrant`] - Capability grant response
 //! - [`protocol::OpExecute`] - Execution request (requires valid capability)
 
+pub mod capability;
 pub mod protocol;
