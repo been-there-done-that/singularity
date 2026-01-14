@@ -1,0 +1,8 @@
+[package]
+name = "singularity"
+version = "0.1.0"
+edition = "2024"
+description = "Single File Backend"
+
+[dependencies]
+
