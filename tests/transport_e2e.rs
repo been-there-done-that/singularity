@@ -41,7 +41,11 @@ async fn test_http_transport_flow() {
     let signer = CapabilitySigner::new(SigningKey::generate());
 
     // State
-    let state = SqliteState::in_memory().unwrap();
+    let mut state = SqliteState::in_memory().unwrap();
+    
+    // Run migrations
+    let migration_manager = singularity::migration::manager::MigrationManager::new();
+    migration_manager.run(&mut state).expect("migrations failed");
 
     // App State
     let app_state = AppState::new(
