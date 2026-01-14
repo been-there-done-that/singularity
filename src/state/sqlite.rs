@@ -227,6 +227,29 @@ impl SqliteState {
                     })
                 }
             },
+            "__object_namespaces" => {
+                let id = id.ok_or(StateError::BadRequest("collection read not supported for __object_namespaces".into()))?;
+                let mut stmt = conn.prepare("SELECT id, name, owner_id, backend, root_path, created_at FROM __object_namespaces WHERE id = ?1")
+                    .map_err(|e| StateError::InternalError(e.to_string()))?;
+                
+                if let Some(row) = stmt.query_row(params![id], |row| {
+                    Ok(json!({
+                        "id": row.get::<_, String>(0)?,
+                        "name": row.get::<_, String>(1)?,
+                        "owner_id": row.get::<_, Option<String>>(2)?,
+                        "backend": row.get::<_, String>(3)?,
+                        "root_path": row.get::<_, String>(4)?,
+                        "created_at": row.get::<_, i64>(5)?,
+                    }))
+                }).optional().map_err(|e| StateError::InternalError(e.to_string()))? {
+                    Ok(row)
+                } else {
+                     Err(StateError::NotFound {
+                        resource_type: resource_type.to_string(),
+                        resource_id: id.to_string(),
+                    })
+                }
+            },
             _ => Err(StateError::NotFound {
                  resource_type: resource_type.to_string(),
                  resource_id: id.unwrap_or("collection").to_string(),
@@ -415,6 +438,21 @@ impl SqliteState {
                      VALUES (?1, ?2, ?3, ?4, ?5)
                      ON CONFLICT(id) DO UPDATE SET roles=excluded.roles, status=excluded.status",
                     params![id, external_subject, roles, status, created_at],
+                ).map_err(|e| StateError::InternalError(e.to_string()))?;
+                Ok(1)
+            },
+            "__object_namespaces" => {
+                let name = data["name"].as_str().ok_or(StateError::BadRequest("missing name".to_string()))?;
+                let backend = data["backend"].as_str().ok_or(StateError::BadRequest("missing backend".to_string()))?;
+                let root_path = data["root_path"].as_str().ok_or(StateError::BadRequest("missing root_path".to_string()))?;
+                let created_at = data["created_at"].as_i64().unwrap_or(0);
+                let owner_id = data["owner_id"].as_str();
+
+                conn.execute(
+                    "INSERT INTO __object_namespaces (id, name, owner_id, backend, root_path, created_at) 
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(id) DO UPDATE SET name=excluded.name, owner_id=excluded.owner_id, backend=excluded.backend, root_path=excluded.root_path",
+                    params![id, name, owner_id, backend, root_path, created_at],
                 ).map_err(|e| StateError::InternalError(e.to_string()))?;
                 Ok(1)
             },

@@ -13,6 +13,7 @@
 //! - No backend-specific logic in execution
 
 use crate::state::{State, StateError};
+use crate::object::ObjectManager;
 
 use super::context::{ExecutionContext, ExecutionMeta, ExecutionTarget};
 use super::executor::OperationExecutor;
@@ -24,12 +25,16 @@ use super::result::{ExecutionError, ExecutionResult};
 /// This is the **final mechanical joint** between execution and storage.
 pub struct StateBackedExecutor<'a, S: State> {
     state: &'a S,
+    object_manager: ObjectManager,
 }
 
 impl<'a, S: State> StateBackedExecutor<'a, S> {
     /// Create a new state-backed executor.
     pub fn new(state: &'a S) -> Self {
-        Self { state }
+        Self { 
+            state,
+            object_manager: ObjectManager::new(),
+        }
     }
 
     /// Get the underlying state backend.
@@ -171,6 +176,124 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                 )?;
 
                 Ok(ExecutionResult::write(count))
+            }
+
+            // OBJECT operations
+            "object.read" => {
+                let namespace_id = &target.resource.resource_type;
+                let key = target.resource.resource_id.as_ref().ok_or(ExecutionError::BadRequest("Missing object key".into()))?;
+
+                // 1. Resolve Namespace Metadata from State
+                let ns_target = ExecutionTarget::new(crate::protocol::Resource::instance("__object_namespaces", namespace_id));
+                let ns_meta = self.state.read(&ns_target, &crate::protocol::FieldSet::all(), None)
+                    .map_err(|e| match e {
+                         StateError::NotFound { .. } => ExecutionError::ResourceNotFound { resource_type: "Namespace".into(), resource_id: namespace_id.clone() },
+                         _ => ExecutionError::from(e)
+                    })?;
+
+                let backend = ns_meta.get("backend").and_then(|v| v.as_str()).unwrap_or("local");
+                let root_path = ns_meta.get("root_path").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("Namespace missing root_path".into()))?;
+
+                // 2. Get Store
+                let store = self.object_manager.get_store(namespace_id, backend, root_path)
+                    .map_err(|e| ExecutionError::StorageError(e.to_string()))?;
+
+                // 3. Delegate to Store
+                let data = store.read(key)
+                    .map_err(|e| ExecutionError::StorageError(e.to_string()))?;
+
+                // Return as Base64 for now
+                use base64::Engine;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(data);
+                Ok(ExecutionResult::Read { data: serde_json::json!({ "data": b64 }) })
+            }
+
+            "object.write" => {
+                let namespace_id = &target.resource.resource_type;
+                let key = target.resource.resource_id.as_ref().ok_or(ExecutionError::BadRequest("Missing object key".into()))?;
+                let payload = payload.ok_or(ExecutionError::BadRequest("Missing payload".into()))?;
+                
+                let data_b64 = payload.get("data").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("Missing data field".into()))?;
+                
+                use base64::Engine;
+                let data = base64::engine::general_purpose::STANDARD.decode(data_b64)
+                    .map_err(|e| ExecutionError::BadRequest(format!("Invalid base64: {}", e)))?;
+
+                // 1. Resolve Namespace
+                let ns_target = ExecutionTarget::new(crate::protocol::Resource::instance("__object_namespaces", namespace_id));
+                let ns_meta = self.state.read(&ns_target, &crate::protocol::FieldSet::all(), None)
+                     .map_err(|e| match e {
+                         StateError::NotFound { .. } => ExecutionError::ResourceNotFound { resource_type: "Namespace".into(), resource_id: namespace_id.clone() },
+                         _ => ExecutionError::from(e)
+                    })?;
+                
+                let backend = ns_meta.get("backend").and_then(|v| v.as_str()).unwrap_or("local");
+                let root_path = ns_meta.get("root_path").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("Namespace missing root_path".into()))?;
+
+                 // 2. Get Store
+                let store = self.object_manager.get_store(namespace_id, backend, root_path)
+                    .map_err(|e| ExecutionError::StorageError(e.to_string()))?;
+
+                store.write(key, &data).map_err(|e| ExecutionError::StorageError(e.to_string()))?;
+                
+                Ok(ExecutionResult::Write { affected_count: 1 })
+            }
+
+            "object.delete" => {
+                let namespace_id = &target.resource.resource_type;
+                let key = target.resource.resource_id.as_ref().ok_or(ExecutionError::BadRequest("Missing object key".into()))?;
+
+                 // 1. Resolve Namespace
+                let ns_target = ExecutionTarget::new(crate::protocol::Resource::instance("__object_namespaces", namespace_id));
+                let ns_meta = self.state.read(&ns_target, &crate::protocol::FieldSet::all(), None)
+                     .map_err(|e| match e {
+                         StateError::NotFound { .. } => ExecutionError::ResourceNotFound { resource_type: "Namespace".into(), resource_id: namespace_id.clone() },
+                         _ => ExecutionError::from(e)
+                    })?;
+                
+                let backend = ns_meta.get("backend").and_then(|v| v.as_str()).unwrap_or("local");
+                let root_path = ns_meta.get("root_path").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("Namespace missing root_path".into()))?;
+
+                 // 2. Get Store
+                let store = self.object_manager.get_store(namespace_id, backend, root_path)
+                    .map_err(|e| ExecutionError::StorageError(e.to_string()))?;
+
+                store.delete(key).map_err(|e| ExecutionError::StorageError(e.to_string()))?;
+                
+                Ok(ExecutionResult::Write { affected_count: 1 })
+            }
+
+            "object.list" => {
+                 let namespace_id = &target.resource.resource_type;
+                 let prefix = target.resource.resource_id.as_deref().unwrap_or("");
+                 
+                  // 1. Resolve Namespace
+                let ns_target = ExecutionTarget::new(crate::protocol::Resource::instance("__object_namespaces", namespace_id));
+                let ns_meta = self.state.read(&ns_target, &crate::protocol::FieldSet::all(), None)
+                     .map_err(|e| match e {
+                         StateError::NotFound { .. } => ExecutionError::ResourceNotFound { resource_type: "Namespace".into(), resource_id: namespace_id.clone() },
+                         _ => ExecutionError::from(e)
+                    })?;
+                
+                let backend = ns_meta.get("backend").and_then(|v| v.as_str()).unwrap_or("local");
+                let root_path = ns_meta.get("root_path").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("Namespace missing root_path".into()))?;
+
+                 // 2. Get Store
+                let store = self.object_manager.get_store(namespace_id, backend, root_path)
+                    .map_err(|e| ExecutionError::StorageError(e.to_string()))?;
+                
+                let entries = store.list(prefix).map_err(|e| ExecutionError::StorageError(e.to_string()))?;
+                
+                // Map entries to JSON
+                let json_entries: Vec<serde_json::Value> = entries.into_iter().map(|e| {
+                    serde_json::json!({
+                        "key": e.key,
+                        "size": e.size,
+                        "created_at": e.created_at
+                    })
+                }).collect();
+                
+                Ok(ExecutionResult::Read { data: serde_json::Value::Array(json_entries) })
             }
 
             // Unknown operation
