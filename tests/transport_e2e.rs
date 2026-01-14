@@ -16,7 +16,8 @@ use singularity::identity::{JwtVerifier, StandardClaims};
 use singularity::policy::PolicyEngine;
 use singularity::protocol::{OpRequest, OpExecute, Resource, CapGrant};
 use singularity::state::SqliteState;
-use singularity::transport::http::{app, AppState};
+use singularity::transport::AppState;
+use singularity::transport::http::app;
 
 #[tokio::test]
 async fn test_http_transport_flow() {
