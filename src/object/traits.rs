@@ -15,6 +15,8 @@ pub enum ObjectError {
     InvalidPath(String),
     #[error("Path traversal detected")]
     PathTraversalDetected,
+    #[error("Operation not supported: {0}")]
+    NotSupported(String),
 }
 
 #[derive(Debug, Clone)]
@@ -36,4 +38,17 @@ pub trait ObjectStore: Send + Sync {
     
     /// List objects with prefix
     fn list(&self, prefix: &str) -> Result<Vec<ObjectEntry>, ObjectError>;
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PresignedUrl {
+    pub url: String,
+    pub method: String,
+    pub headers: std::collections::HashMap<String, String>,
+    pub expires_at: i64,
+}
+
+pub trait ObjectStorePresign: ObjectStore {
+    fn presign_put(&self, path: &str, ttl: std::time::Duration) -> Result<PresignedUrl, ObjectError>;
+    fn presign_get(&self, path: &str, ttl: std::time::Duration) -> Result<PresignedUrl, ObjectError>;
 }

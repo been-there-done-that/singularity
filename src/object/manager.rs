@@ -1,4 +1,4 @@
-use super::traits::{ObjectStore, ObjectError};
+use super::traits::{ObjectStore, ObjectStorePresign, ObjectError};
 use super::local::LocalFsStore;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -8,7 +8,7 @@ pub struct ObjectManager {
     // For now, hardcode or dynamic?
     // In V1, we likely construct backends on demand from DB config or cache them.
     // Let's cache instantiated backends.
-    stores: Mutex<HashMap<String, Arc<dyn ObjectStore>>>,
+    stores: Mutex<HashMap<String, Arc<dyn ObjectStorePresign>>>,
 }
 
 impl ObjectManager {
@@ -28,14 +28,14 @@ impl ObjectManager {
         namespace_id: &str, 
         backend_type: &str, 
         root_path: &str
-    ) -> Result<Arc<dyn ObjectStore>, ObjectError> {
+    ) -> Result<Arc<dyn ObjectStorePresign>, ObjectError> {
         let mut cache = self.stores.lock().unwrap();
         
         if let Some(store) = cache.get(namespace_id) {
             return Ok(store.clone());
         }
 
-        let store: Arc<dyn ObjectStore> = match backend_type {
+        let store: Arc<dyn ObjectStorePresign> = match backend_type {
             "local" => Arc::new(LocalFsStore::new(root_path)?),
              // "s3" => ...
             _ => return Err(ObjectError::BackendError(format!("Unknown backend type: {}", backend_type))),

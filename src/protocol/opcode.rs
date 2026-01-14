@@ -116,6 +116,7 @@ pub const OBJECT_READ: &str = "object.read";
 pub const OBJECT_WRITE: &str = "object.write";
 pub const OBJECT_DELETE: &str = "object.delete";
 pub const OBJECT_LIST: &str = "object.list";
+pub const OBJECT_PRESIGN: &str = "object.presign";
 
 #[cfg(test)]
 mod tests {

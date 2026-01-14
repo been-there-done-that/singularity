@@ -159,6 +159,16 @@ impl ObjectStore for LocalFsStore {
     }
 }
 
+impl super::traits::ObjectStorePresign for LocalFsStore {
+    fn presign_put(&self, _path: &str, _ttl: std::time::Duration) -> Result<super::traits::PresignedUrl, ObjectError> {
+        Err(ObjectError::NotSupported("Local backend does not support presigned URLs".to_string()))
+    }
+    
+    fn presign_get(&self, _path: &str, _ttl: std::time::Duration) -> Result<super::traits::PresignedUrl, ObjectError> {
+        Err(ObjectError::NotSupported("Local backend does not support presigned URLs".to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

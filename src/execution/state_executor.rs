@@ -296,6 +296,44 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                 Ok(ExecutionResult::Read { data: serde_json::Value::Array(json_entries) })
             }
 
+            "object.presign" => {
+                 let namespace_id = &target.resource.resource_type;
+                 let key = target.resource.resource_id.as_deref().ok_or(ExecutionError::BadRequest("Missing object key".into()))?;
+                 let payload = payload.ok_or(ExecutionError::BadRequest("Missing payload".into()))?;
+                 
+                 let method = payload.get("method").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("Missing method".into()))?;
+                 let ttl_secs = payload.get("ttl").and_then(|v| v.as_u64()).unwrap_or(300);
+                 
+                 // 1. Resolve Namespace
+                let ns_target = ExecutionTarget::new(crate::protocol::Resource::instance("__object_namespaces", namespace_id));
+                let ns_meta = self.state.read(&ns_target, &crate::protocol::FieldSet::all(), None)
+                     .map_err(|e| match e {
+                         StateError::NotFound { .. } => ExecutionError::ResourceNotFound { resource_type: "Namespace".into(), resource_id: namespace_id.clone() },
+                         _ => ExecutionError::from(e)
+                    })?;
+                
+                let backend = ns_meta.get("backend").and_then(|v| v.as_str()).unwrap_or("local");
+                let root_path = ns_meta.get("root_path").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("Namespace missing root_path".into()))?;
+
+                 // 2. Get Store
+                let store = self.object_manager.get_store(namespace_id, backend, root_path)
+                    .map_err(|e| ExecutionError::StorageError(e.to_string()))?;
+                
+                // 3. Delegate Presign
+                use std::time::Duration;
+                let ttl = Duration::from_secs(ttl_secs);
+                
+                let presigned = match method {
+                    "PUT" => store.presign_put(key, ttl),
+                    "GET" => store.presign_get(key, ttl),
+                    _ => return Err(ExecutionError::BadRequest("Invalid method for presign".into())),
+                }.map_err(|e| ExecutionError::StorageError(e.to_string()))?;
+                
+                Ok(ExecutionResult::Read { 
+                    data: serde_json::json!(presigned) 
+                })
+            }
+
             // Unknown operation
             _ => Err(ExecutionError::OperationNotSupported(op.to_string())),
         }
