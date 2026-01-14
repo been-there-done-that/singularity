@@ -30,6 +30,10 @@ pub enum StateError {
     /// Internal backend error.
     #[error("internal error: {0}")]
     InternalError(String),
+
+    /// Bad Request (Input error).
+    #[error("bad request: {0}")]
+    BadRequest(String),
 }
 
 impl StateError {
