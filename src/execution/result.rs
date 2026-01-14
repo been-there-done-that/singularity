@@ -34,6 +34,16 @@ pub enum ExecutionError {
         resource_type: String,
         resource_id: String,
     },
+
+    /// Required backend capability missing.
+    #[error("backend capability missing: {0}")]
+    BackendCapabilityMissing(String),
+
+    /// Target resource does not match capability.
+    #[error("resource mismatch: {reason}")]
+    ResourceMismatch {
+        reason: String,
+    },
 }
 
 /// Result of an execution operation.

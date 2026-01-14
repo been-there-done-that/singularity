@@ -28,8 +28,10 @@ mod constraint;
 mod context;
 mod executor;
 mod result;
+mod state_executor;
 
 pub use constraint::validate_constraints;
 pub use context::{ExecutionContext, ExecutionMeta, ExecutionTarget};
 pub use executor::OperationExecutor;
 pub use result::{ExecutionError, ExecutionResult};
+pub use state_executor::StateBackedExecutor;
