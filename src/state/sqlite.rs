@@ -365,6 +365,10 @@ impl State for SqliteState {
         }
     }
 
+    fn execute_ddl(&self, sql: &str) -> Result<(), StateError> {
+        self.conn.lock().unwrap().execute_batch(sql).map_err(|e| StateError::InternalError(e.to_string()))
+    }
+
     fn capabilities(&self) -> &StateCapabilities {
         &self.capabilities
     }
