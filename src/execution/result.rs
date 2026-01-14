@@ -44,6 +44,10 @@ pub enum ExecutionError {
     ResourceMismatch {
         reason: String,
     },
+
+    /// Bad Request (Input error).
+    #[error("bad request: {0}")]
+    BadRequest(String),
 }
 
 /// Result of an execution operation.
