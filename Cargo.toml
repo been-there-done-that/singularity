@@ -24,9 +24,13 @@ tracing-subscriber = "0.3"
 tonic = "0.10"
 prost = "0.12"
 prost-types = "0.12"
+regex = "1.12.2"
+uuid = { version = "1.19.0", features = ["v4"] }
+walkdir = "2.5.0"
 
 [build-dependencies]
 tonic-build = "0.10"
 
 [dev-dependencies]
 tokio-stream = { version = "0.1", features = ["net"] }
+tempfile = "3.10"

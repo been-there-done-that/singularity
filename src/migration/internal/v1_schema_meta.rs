@@ -43,14 +43,15 @@ impl InternalMigration for V1SchemaMeta {
             );
         ").map_err(|e| TransportError::Internal(e.to_string()))?;
         
-        // __folders - Logical grouping
+        // __object_namespaces
         state.execute_ddl("
-            CREATE TABLE IF NOT EXISTS __folders (
+            CREATE TABLE IF NOT EXISTS __object_namespaces (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
-                parent_id TEXT,
-                created_at INTEGER NOT NULL,
-                FOREIGN KEY(parent_id) REFERENCES __folders(id) ON DELETE CASCADE
+                owner_id TEXT,
+                backend TEXT NOT NULL,
+                root_path TEXT NOT NULL,
+                created_at INTEGER NOT NULL
             );
         ").map_err(|e| TransportError::Internal(e.to_string()))?;
         

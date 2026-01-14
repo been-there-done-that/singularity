@@ -48,8 +48,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
 
     let policy = PolicyEngine::new();
-    // TODO: Load system policy from file/db
-    let sys_policy = "true".to_string(); 
+    
+    // Load system policy
+    let sys_policy = std::fs::read_to_string("src/policy/defaults.rhai")
+        .unwrap_or_else(|_| {
+            warn!("defaults.rhai not found, using secure default (deny all)");
+            "false".to_string()
+        });
 
     // Signing Key (Ephemeral for now - resets on restart)
     // Production should load this from secure storage/env

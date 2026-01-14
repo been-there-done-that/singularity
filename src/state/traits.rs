@@ -106,6 +106,22 @@ pub trait State: Send + Sync {
     /// Safe only because it is internal.
     fn execute_ddl(&self, sql: &str) -> Result<(), StateError>;
 
+    /// Ensure an internal user exists for the given external subject.
+    ///
+    /// # Arguments
+    ///
+    /// * `external_subject` - Value from JWT "sub" claim
+    /// * `roles` - List of roles from JWT
+    ///
+    /// # Returns
+    ///
+    /// * The persistent internal ID for this user.
+    fn ensure_internal_user(&self, external_subject: &str, roles: &[String]) -> Result<String, StateError>;
+
+    /// Get the owner_id of a resource instance.
+    /// Returns None if resource doesn't exist or doesn't have an owner.
+    fn get_resource_owner(&self, resource_type: &str, resource_id: &str) -> Result<Option<String>, StateError>;
+
     /// Get the capabilities of this state backend.
     fn capabilities(&self) -> &StateCapabilities;
 }

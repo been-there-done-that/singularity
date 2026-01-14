@@ -32,4 +32,5 @@ pub mod policy;
 pub mod protocol;
 pub mod schema;
 pub mod state;
+pub mod object;
 pub mod transport;

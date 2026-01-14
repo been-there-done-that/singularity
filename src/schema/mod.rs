@@ -6,6 +6,8 @@
 //! Tables are Resources. Fields are Sub-resources.
 //! Schema mutations are capability-gated operations.
 
+pub mod validation;
+
 use serde::{Serialize, Deserialize};
 
 /// Defines a User Table (Model).

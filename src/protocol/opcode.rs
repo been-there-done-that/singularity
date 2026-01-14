@@ -108,10 +108,15 @@ pub const SCHEMA_DROP_FIELD: &str = "schema.drop_field";
 pub const SCHEMA_RENAME_MODEL: &str = "schema.rename_model";
 /// Reserved: Rename a Field.
 pub const SCHEMA_RENAME_FIELD: &str = "schema.rename_field";
-/// Reserved: Attach a Folder.
-pub const SCHEMA_ATTACH_FOLDER: &str = "schema.attach_folder";
-/// Reserved: Detach a Folder.
-pub const SCHEMA_DETACH_FOLDER: &str = "schema.detach_folder";
+/// Reserved: List Models.
+pub const SCHEMA_LIST_MODELS: &str = "schema.list_models";
+
+// Object Plane Opcodes
+pub const OBJECT_READ: &str = "object.read";
+pub const OBJECT_WRITE: &str = "object.write";
+pub const OBJECT_DELETE: &str = "object.delete";
+pub const OBJECT_LIST: &str = "object.list";
+pub const OBJECT_PRESIGN: &str = "object.presign";
 
 #[cfg(test)]
 mod tests {

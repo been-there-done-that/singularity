@@ -17,6 +17,8 @@ use std::collections::HashMap;
 pub struct PolicySubject {
     /// Unique subject identifier (e.g., user ID).
     pub id: String,
+    /// Internal persistend ID (managed by state).
+    pub internal_id: Option<String>,
     /// Subject's roles (e.g., ["admin", "editor"]).
     pub roles: Vec<String>,
     /// Optional namespaced claims for extension.
@@ -28,6 +30,7 @@ impl PolicySubject {
     pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
+            internal_id: None,
             roles: Vec::new(),
             claims: HashMap::new(),
         }
@@ -48,6 +51,12 @@ impl PolicySubject {
     /// Check if subject has a specific role.
     pub fn has_role(&self, role: &str) -> bool {
         self.roles.iter().any(|r| r == role)
+    }
+
+    /// Set the internal ID for the subject.
+    pub fn with_internal_id(mut self, internal_id: impl Into<String>) -> Self {
+        self.internal_id = Some(internal_id.into());
+        self
     }
 }
 
@@ -93,6 +102,8 @@ pub struct PolicyContext {
     pub op: Opcode,
     /// Request input/payload (optional).
     pub input: Option<serde_json::Value>,
+    /// Resource owner ID (if known).
+    pub resource_owner: Option<String>,
     /// Environment (time, etc.) - only source of non-deterministic data.
     pub env: PolicyEnv,
 }
@@ -110,6 +121,7 @@ impl PolicyContext {
             resource,
             op: op.into(),
             input: None,
+            resource_owner: None,
             env,
         }
     }
@@ -117,6 +129,12 @@ impl PolicyContext {
     /// Set the input payload.
     pub fn with_input(mut self, input: serde_json::Value) -> Self {
         self.input = Some(input);
+        self
+    }
+
+    /// Set the resource owner ID.
+    pub fn with_resource_owner(mut self, owner_id: impl Into<String>) -> Self {
+        self.resource_owner = Some(owner_id.into());
         self
     }
 }

@@ -14,6 +14,8 @@ use crate::protocol::FieldSet;
 use super::capabilities::StateCapabilities;
 use super::error::StateError;
 use super::traits::State;
+use crate::schema::validation::{validate_identifier, quote_identifier};
+use uuid::Uuid;
 
 /// SQLite state backend.
 ///
@@ -173,51 +175,12 @@ impl SqliteState {
     }
 
     /// Read internal tables.
-    fn read_internal(&self, resource_type: &str, id: &str) -> Result<Value, StateError> {
+    fn read_internal(&self, resource_type: &str, id: Option<&str>, constraints: Option<&Value>) -> Result<Value, StateError> {
         let conn = self.conn.lock().unwrap();
         match resource_type {
-            "__models" => {
-                let mut stmt = conn.prepare("SELECT id, name, namespace, created_at FROM __models WHERE id = ?1")
-                    .map_err(|e| StateError::InternalError(e.to_string()))?;
-                let mut rows = stmt.query(params![id])
-                    .map_err(|e| StateError::InternalError(e.to_string()))?;
-                
-                if let Some(row) = rows.next().map_err(|e| StateError::InternalError(e.to_string()))? {
-                    // Fetch fields
-                    let mut fields_stmt = conn.prepare("SELECT id, name, field_type, required, unique_flag, default_val, created_at FROM __fields WHERE model_id = ?1")
-                        .map_err(|e| StateError::InternalError(e.to_string()))?;
-                    let fields_iter = fields_stmt.query_map(params![id], |row| {
-                        let f_type_str: String = row.get(2)?;
-                        let default_str: Option<String> = row.get(5)?;
-                        
-                        Ok(json!({
-                            "id": row.get::<_, String>(0)?,
-                            "name": row.get::<_, String>(1)?,
-                            "field_type": serde_json::from_str::<Value>(&f_type_str).unwrap_or(Value::Null),
-                            "required": row.get::<_, i64>(3)? != 0,
-                            "unique": row.get::<_, i64>(4)? != 0,
-                            "default": default_str.map(|s| serde_json::from_str::<Value>(&s).unwrap_or(Value::Null)),
-                            "created_at": row.get::<_, i64>(6)?,
-                        }))
-                    }).map_err(|e| StateError::InternalError(e.to_string()))?;
-
-                    let fields: Vec<Value> = fields_iter.filter_map(Result::ok).collect();
-
-                    Ok(json!({
-                        "id": row.get::<_, String>(0).unwrap(),
-                        "name": row.get::<_, String>(1).unwrap(),
-                        "namespace": row.get::<_, String>(2).unwrap(),
-                        "created_at": row.get::<_, i64>(3).unwrap(),
-                        "fields": fields
-                    }))
-                } else {
-                    Err(StateError::NotFound {
-                        resource_type: resource_type.to_string(),
-                        resource_id: id.to_string(),
-                    })
-                }
-            },
+            "__models" => self.read_internal_models(&conn, id, constraints),
             "__fields" => {
+                let id = id.ok_or(StateError::BadRequest("collection read not supported for __fields".into()))?;
                 let mut stmt = conn.prepare("SELECT id, model_id, name, field_type, required, unique_flag, default_val, created_at FROM __fields WHERE id = ?1")
                    .map_err(|e| StateError::InternalError(e.to_string()))?;
                 if let Some(row) = stmt.query_row(params![id], |row| {
@@ -243,6 +206,7 @@ impl SqliteState {
                 }
             },
             "__internal_users" => {
+                let id = id.ok_or(StateError::BadRequest("collection read not supported for __internal_users".into()))?;
                 let mut stmt = conn.prepare("SELECT id, external_subject, roles, status, created_at FROM __internal_users WHERE id = ?1")
                     .map_err(|e| StateError::InternalError(e.to_string()))?;
                 if let Some(row) = stmt.query_row(params![id], |row| {
@@ -263,10 +227,153 @@ impl SqliteState {
                     })
                 }
             },
+            "__object_namespaces" => {
+                let id = id.ok_or(StateError::BadRequest("collection read not supported for __object_namespaces".into()))?;
+                let mut stmt = conn.prepare("SELECT id, name, owner_id, backend, root_path, created_at FROM __object_namespaces WHERE id = ?1")
+                    .map_err(|e| StateError::InternalError(e.to_string()))?;
+                
+                if let Some(row) = stmt.query_row(params![id], |row| {
+                    Ok(json!({
+                        "id": row.get::<_, String>(0)?,
+                        "name": row.get::<_, String>(1)?,
+                        "owner_id": row.get::<_, Option<String>>(2)?,
+                        "backend": row.get::<_, String>(3)?,
+                        "root_path": row.get::<_, String>(4)?,
+                        "created_at": row.get::<_, i64>(5)?,
+                    }))
+                }).optional().map_err(|e| StateError::InternalError(e.to_string()))? {
+                    Ok(row)
+                } else {
+                     Err(StateError::NotFound {
+                        resource_type: resource_type.to_string(),
+                        resource_id: id.to_string(),
+                    })
+                }
+            },
             _ => Err(StateError::NotFound {
                  resource_type: resource_type.to_string(),
-                 resource_id: id.to_string(),
+                 resource_id: id.unwrap_or("collection").to_string(),
             }),
+        }
+    }
+
+    fn read_internal_models(&self, conn: &rusqlite::Connection, id: Option<&str>, constraints: Option<&Value>) -> Result<Value, StateError> {
+        if let Some(model_id) = id {
+            // Instance Read
+             let mut stmt = conn.prepare("SELECT id, name, namespace, created_at, owner_id FROM __models WHERE id = ?1")
+                    .map_err(|e| StateError::InternalError(e.to_string()))?;
+                let mut rows = stmt.query(params![model_id])
+                    .map_err(|e| StateError::InternalError(e.to_string()))?;
+                
+                if let Some(row) = rows.next().map_err(|e| StateError::InternalError(e.to_string()))? {
+                    // Check ownership constraint if present?
+                    let owner: Option<String> = row.get(4).unwrap_or(None);
+                    // Standard constraint checking mechanism usually happens via SQL.
+                    // For now, we manually check if "owner_id" constraint is present.
+                    if let Some(c) = constraints {
+                        if let Some(req_owner) = c.get("owner_id").and_then(|v| v.as_str()) {
+                             // System models (None owner) are visible to all? Or strict?
+                             // Strict: You see only what you own. None owner = System.
+                             // If I request my models, I shouldn't see system models?
+                             // Or should I see system models too?
+                             // "You can only see models YOU own"
+                             if let Some(actual) = &owner {
+                                 if actual != req_owner {
+                                     return Err(StateError::NotFound { resource_type: "__models".into(), resource_id: model_id.into() });
+                                 }
+                             } else {
+                                 // System model. Allow read? 
+                                 // "Admin bypass" usually handled by not passing constraint?
+                                 // Or by policy. If constraint is passed, it implies filtering.
+                                 // Let's assume strict filtering: If constraint is owner_id=X, then only models owned by X.
+                                 return Err(StateError::NotFound { resource_type: "__models".into(), resource_id: model_id.into() });
+                             }
+                        }
+                    }
+
+                    // Fetch fields
+                    let mut fields_stmt = conn.prepare("SELECT id, name, field_type, required, unique_flag, default_val, created_at FROM __fields WHERE model_id = ?1")
+                        .map_err(|e| StateError::InternalError(e.to_string()))?;
+                    let fields_iter = fields_stmt.query_map(params![model_id], |row| {
+                        let f_type_str: String = row.get(2)?;
+                        let default_str: Option<String> = row.get(5)?;
+                        
+                        Ok(json!({
+                            "id": row.get::<_, String>(0)?,
+                            "name": row.get::<_, String>(1)?,
+                            "field_type": serde_json::from_str::<Value>(&f_type_str).unwrap_or(Value::Null),
+                            "required": row.get::<_, i64>(3)? != 0,
+                            "unique": row.get::<_, i64>(4)? != 0,
+                            "default": default_str.map(|s| serde_json::from_str::<Value>(&s).unwrap_or(Value::Null)),
+                            "created_at": row.get::<_, i64>(6)?,
+                        }))
+                    }).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+                    let fields: Vec<Value> = fields_iter.filter_map(Result::ok).collect();
+
+                    Ok(json!({
+                        "id": row.get::<_, String>(0).unwrap(),
+                        "name": row.get::<_, String>(1).unwrap(),
+                        "namespace": row.get::<_, String>(2).unwrap(),
+                        "created_at": row.get::<_, i64>(3).unwrap(),
+                        "owner_id": owner.unwrap_or_else(|| "system".to_string()),
+                        "fields": fields
+                    }))
+                } else {
+                    Err(StateError::NotFound {
+                        resource_type: "__models".to_string(),
+                        resource_id: model_id.to_string(),
+                    })
+                }
+        } else {
+            // Collection Read
+            let mut sql = "SELECT id, name, namespace, created_at, owner_id FROM __models".to_string();
+            let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+            if let Some(c) = constraints {
+                if let Some(req_owner) = c.get("owner_id").and_then(|v| v.as_str()) {
+                    sql.push_str(" WHERE owner_id = ?1");
+                    params_vec.push(Box::new(req_owner.to_string()));
+                }
+            }
+            
+            let mut stmt = conn.prepare(&sql).map_err(|e| StateError::InternalError(e.to_string()))?;
+            
+            // We need to convert to params slice.
+            // Since we have max 1 param, let's simplify.
+            
+            let map_fn = |row: &rusqlite::Row| -> rusqlite::Result<(String, String, String, i64, Option<String>)> {
+                 Ok((
+                    row.get(0)?, 
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?
+                ))
+            };
+
+            let rows_result = if params_vec.is_empty() {
+                stmt.query_map([], map_fn)
+            } else {
+                 stmt.query_map(params![params_vec[0]], map_fn)
+            };
+
+            let rows = rows_result.map_err(|e| StateError::InternalError(e.to_string()))?;
+            
+            let mut models = Vec::new();
+            for r in rows {
+                if let Ok((id, name, namespace, created_at, owner)) = r {
+                    models.push(json!({
+                        "id": id,
+                        "name": name,
+                        "namespace": namespace,
+                        "created_at": created_at,
+                        "owner_id": owner.unwrap_or_else(|| "system".to_string()),
+                    }));
+                }
+            }
+            
+            Ok(json!(models)) 
         }
     }
 
@@ -277,12 +384,18 @@ impl SqliteState {
                 let name = data["name"].as_str().ok_or(StateError::BadRequest("missing name".to_string()))?;
                 let namespace = data["namespace"].as_str().unwrap_or("public");
                 let created_at = data["created_at"].as_i64().unwrap_or(0); // Should be set by caller
-                
+                let owner_id = data["owner_id"].as_str(); // Optional owner
+
                 conn.execute(
-                    "INSERT INTO __models (id, name, namespace, created_at) VALUES (?1, ?2, ?3, ?4)
-                     ON CONFLICT(id) DO UPDATE SET name=excluded.name, namespace=excluded.namespace",
-                    params![id, name, namespace, created_at],
+                    "INSERT INTO __models (id, name, namespace, created_at, owner_id) VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(id) DO UPDATE SET name=excluded.name, namespace=excluded.namespace, owner_id=excluded.owner_id",
+                    params![id, name, namespace, created_at, owner_id],
                 ).map_err(|e| StateError::InternalError(e.to_string()))?;
+                
+                // Create physical table
+                // Drop lock before calling helper helper (it acquires lock itself)
+                drop(conn);
+                self.create_physical_table(name)?;
                 
                 Ok(1)
             },
@@ -294,6 +407,13 @@ impl SqliteState {
                 let unique = data["unique"].as_bool().unwrap_or(false);
                 let default_val = if data["default"].is_null() { None } else { Some(serde_json::to_string(&data["default"]).unwrap()) };
                 let created_at = data["created_at"].as_i64().unwrap_or(0);
+                
+                // Fetch model name needed for physical table
+                let model_name: String = conn.query_row(
+                    "SELECT name FROM __models WHERE id = ?1",
+                    params![model_id],
+                    |row| row.get(0),
+                ).map_err(|_| StateError::BadRequest(format!("model {} not found", model_id)))?;
 
                 conn.execute(
                     "INSERT INTO __fields (id, model_id, name, field_type, required, unique_flag, default_val, created_at) 
@@ -301,6 +421,10 @@ impl SqliteState {
                      ON CONFLICT(id) DO UPDATE SET name=excluded.name, required=excluded.required, unique_flag=excluded.unique_flag, default_val=excluded.default_val",
                     params![id, model_id, name, f_type, required, unique, default_val, created_at],
                 ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+                // Add col to physical table
+                drop(conn);
+                self.alter_add_column(&model_name, name, &data)?;
                 Ok(1)
             },
             "__internal_users" => {
@@ -317,18 +441,126 @@ impl SqliteState {
                 ).map_err(|e| StateError::InternalError(e.to_string()))?;
                 Ok(1)
             },
+            "__object_namespaces" => {
+                let name = data["name"].as_str().ok_or(StateError::BadRequest("missing name".to_string()))?;
+                let backend = data["backend"].as_str().ok_or(StateError::BadRequest("missing backend".to_string()))?;
+                let root_path = data["root_path"].as_str().ok_or(StateError::BadRequest("missing root_path".to_string()))?;
+                let created_at = data["created_at"].as_i64().unwrap_or(0);
+                let owner_id = data["owner_id"].as_str();
+
+                conn.execute(
+                    "INSERT INTO __object_namespaces (id, name, owner_id, backend, root_path, created_at) 
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(id) DO UPDATE SET name=excluded.name, owner_id=excluded.owner_id, backend=excluded.backend, root_path=excluded.root_path",
+                    params![id, name, owner_id, backend, root_path, created_at],
+                ).map_err(|e| StateError::InternalError(e.to_string()))?;
+                Ok(1)
+            },
             _ => Err(StateError::BadRequest(format!("cannot write to internal table {}", resource_type))),
         }
+    }
+
+    /// Create a physical table for a model.
+    fn create_physical_table(&self, model_name: &str) -> Result<(), StateError> {
+        validate_identifier(model_name)
+            .map_err(|e| StateError::BadRequest(e))?;
+        
+        let table_name = quote_identifier(model_name);
+        let sql = format!(
+            "CREATE TABLE IF NOT EXISTS {} (
+                id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            ) STRICT;", 
+            table_name
+        );
+
+        self.conn.lock().unwrap().execute(&sql, [])
+            .map_err(|e| StateError::InternalError(e.to_string()))?;
+        
+        Ok(())
+    }
+
+    /// Add a column to a physical table.
+    fn alter_add_column(&self, model_name: &str, field_name: &str, field_data: &Value) -> Result<(), StateError> {
+        validate_identifier(model_name).map_err(StateError::BadRequest)?;
+        validate_identifier(field_name).map_err(StateError::BadRequest)?;
+
+        let table_name = quote_identifier(model_name);
+        let column_name = quote_identifier(field_name);
+        
+        // Map FieldType to SQLite Type
+        let field_type = &field_data["field_type"];
+        let type_name = field_type["type"].as_str().unwrap_or("String");
+        
+        let sql_type = match type_name {
+            "String" | "Json" | "Ref" => "TEXT",
+            "Int" | "Bool" => "INTEGER",
+            "Float" => "REAL",
+            _ => "TEXT",
+        };
+
+        // SQLite ADD COLUMN limitations: cannot add NOT NULL without DEFAULT
+        // For now, we add as NULLABLE unless default is provided.
+        // STRICT tables enforce types, but NULLability is separate.
+        
+        let sql = format!(
+            "ALTER TABLE {} ADD COLUMN {} {}",
+            table_name, column_name, sql_type
+        );
+
+        self.conn.lock().unwrap().execute(&sql, [])
+            .map_err(|e| StateError::InternalError(e.to_string()))?;
+            
+        Ok(())
+    }
+
+    /// Drop a column from a physical table.
+    fn alter_drop_column(&self, model_name: &str, field_name: &str) -> Result<(), StateError> {
+        validate_identifier(model_name).map_err(StateError::BadRequest)?;
+        validate_identifier(field_name).map_err(StateError::BadRequest)?;
+
+        let table_name = quote_identifier(model_name);
+        let column_name = quote_identifier(field_name);
+
+        let sql = format!(
+            "ALTER TABLE {} DROP COLUMN {}",
+            table_name, column_name
+        );
+
+        self.conn.lock().unwrap().execute(&sql, [])
+            .map_err(|e| StateError::InternalError(e.to_string()))?;
+            
+        Ok(())
     }
 
     fn delete_internal(&self, resource_type: &str, id: &str) -> Result<u64, StateError> {
         let conn = self.conn.lock().unwrap();
         match resource_type {
             "__fields" => {
+                // Get model name and field name before deleting
+                let (model_id, name): (String, String) = conn.query_row(
+                    "SELECT model_id, name FROM __fields WHERE id = ?1",
+                    params![id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ).map_err(|_| StateError::BadRequest(format!("field {} not found", id)))?;
+
+                let model_name: String = conn.query_row(
+                    "SELECT name FROM __models WHERE id = ?1",
+                    params![model_id],
+                    |row| row.get(0),
+                ).map_err(|_| StateError::BadRequest(format!("model {} not found", model_id)))?;
+
                 let count = conn.execute(
                     "DELETE FROM __fields WHERE id = ?1",
                     params![id],
                 ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+                // Drop col from physical table
+                drop(conn);
+                self.alter_drop_column(&model_name, &name)?;
+
                 Ok(count as u64)
             },
             // Cannot delete models or internal users via this API yet/ever?
@@ -358,10 +590,64 @@ impl State for SqliteState {
             Some(id) => {
                 // Instance read
                 if resource_type.starts_with("__") {
-                    return self.read_internal(&resource_type, &id);
+                    return self.read_internal(&resource_type, Some(&id), constraints);
                 }
 
                 let conn = self.conn.lock().unwrap();
+                
+                // CHECK IF MODEL EXISTS (Physical Table)
+                let is_model_defined: bool = conn.query_row(
+                    "SELECT 1 FROM __models WHERE name = ?1",
+                    params![resource_type],
+                    |_| Ok(true),
+                ).unwrap_or(false);
+
+                if is_model_defined {
+                     let table_name = quote_identifier(&resource_type);
+                     // Select all columns? Or filter? 
+                     // Select * is easiest, then filter in memory.
+                     // TODO: Optimize to select specific fields from SQL.
+                     let sql = format!("SELECT * FROM {} WHERE id = ?1", table_name);
+                     
+                     // We need column names to reconstruct JSON.
+                     let mut stmt = conn.prepare(&sql).map_err(|e| StateError::InternalError(e.to_string()))?;
+                     let col_names: Vec<String> = stmt.column_names().into_iter().map(|s| s.to_string()).collect();
+                     
+                     let result = stmt.query_row(params![id], |row| {
+                         let mut map = serde_json::Map::new();
+                         for (i, col_name) in col_names.iter().enumerate() {
+                             let val_ref = row.get_ref(i)?;
+                             let val = match val_ref {
+                                 rusqlite::types::ValueRef::Null => Value::Null,
+                                 rusqlite::types::ValueRef::Integer(i) => json!(i),
+                                 rusqlite::types::ValueRef::Real(r) => json!(r),
+                                 rusqlite::types::ValueRef::Text(t) => {
+                                     let s = std::str::from_utf8(t).unwrap_or("");
+                                     // Try parsing as JSON if it looks like it? No, explicit schema would be better.
+                                     // For now, treat as String.
+                                      json!(s)
+                                 },
+                                 rusqlite::types::ValueRef::Blob(_) => json!("<blob>"), 
+                             };
+                             map.insert(col_name.clone(), val);
+                         }
+                         Ok(Value::Object(map))
+                     }).optional().map_err(|e| StateError::InternalError(e.to_string()))?;
+
+                    if let Some(mut data) = result {
+                        // Inject _version mock? Physical tables don't have version yet unless we added it.
+                        // We didn't add version col in create_physical_table.
+                        // Todo: Add version col to standard schema.
+                        data.as_object_mut().unwrap().insert("_version".to_string(), json!(1));
+                        return Ok(Self::filter_fields(data, fields));
+                    } else {
+                         return Err(StateError::NotFound {
+                            resource_type: resource_type.to_string(),
+                            resource_id: id.to_string(),
+                        });
+                    }
+                }
+
                 let result: Result<(String, i64, bool), rusqlite::Error> = conn.query_row(
                     "SELECT data, version, deleted FROM resources 
                      WHERE resource_type = ?1 AND resource_id = ?2",
@@ -401,6 +687,10 @@ impl State for SqliteState {
                 }
             }
             None => {
+                if resource_type.starts_with("__") {
+                     return self.read_internal(&resource_type, None, constraints);
+                }
+
                 let conn = self.conn.lock().unwrap();
                 // Collection read
                 let mut stmt = conn.prepare(
@@ -453,7 +743,146 @@ impl State for SqliteState {
             return self.write_internal(&resource_type, &id, payload.clone());
         }
 
+        if resource_type.starts_with("__") {
+            return self.write_internal(&resource_type, &id, payload.clone());
+        }
+
         let conn = self.conn.lock().unwrap();
+        
+        // CHECK IF MODEL EXISTS (Physical Table)
+        let is_model_defined: bool = conn.query_row(
+            "SELECT 1 FROM __models WHERE name = ?1",
+            params![resource_type],
+            |_| Ok(true),
+        ).unwrap_or(false);
+
+        if is_model_defined {
+            // PHYSICAL TABLE WRITE
+            let table_name = quote_identifier(&resource_type);
+            
+            // Should properly map fields to columns. 
+            // For now, iterate payload keys. 
+            // NOTE: This assumes payload keys match column names.
+            // Safety: identifiers are validated at schema creation, ensuring they are safe column names.
+            match payload {
+                Value::Object(map) => {
+                     let mut cols = vec!["id".to_string(), "created_at".to_string(), "updated_at".to_string()];
+                     let mut placeholders = vec!["?1".to_string(), "?2".to_string(), "?3".to_string()];
+                     let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![
+                         Box::new(id.clone()),
+                         Box::new(0_i64), // created_at placeholder (updated in query)
+                         Box::new(0_i64)  // updated_at placeholder
+                     ];
+                     let mut updates = vec![
+                         "updated_at = strftime('%s', 'now')".to_string()
+                     ];
+                     
+                     for (k, v) in map {
+                         cols.push(quote_identifier(k));
+                         placeholders.push(format!("?{}", values.len() + 1));
+                         
+                         // Simple conversion for now
+                         match v {
+                             Value::String(s) => values.push(Box::new(s.clone())),
+                             Value::Number(n) => {
+                                 if let Some(i) = n.as_i64() {
+                                     values.push(Box::new(i));
+                                 } else if let Some(f) = n.as_f64() {
+                                     values.push(Box::new(f));
+                                 } else {
+                                     values.push(Box::new(n.to_string()));
+                                 }
+                             },
+                             Value::Bool(b) => values.push(Box::new(if *b { 1 } else { 0 })),
+                             _ => values.push(Box::new(v.to_string())), // Json/Array -> Text
+                         }
+                         
+                         updates.push(format!("{} = excluded.{}", quote_identifier(k), quote_identifier(k)));
+                     }
+
+                     let sql = format!(
+                         "INSERT INTO {} ({}) VALUES ({})
+                          ON CONFLICT(id) DO UPDATE SET {}",
+                         table_name,
+                         cols.join(", "),
+                         placeholders.join(", "),
+                         updates.join(", ")
+                     );
+                     
+                     // We need to inject created_at/updated_at logic better or rely on defaults?
+                     // For upsert: created_at should be consistent.
+                     // Let's refine the VALUES:
+                     // created_at = COALESCE((SELECT created_at FROM {table} WHERE id=?1), strftime('%s','now'))
+                     // updated_at = strftime('%s','now')
+                     // This is hard with single INSERT statement.
+                     // Simplification: Always write created_at as now, relies on IGNORE/UPDATE?
+                     // ON CONFLICT DO UPDATE SET created_at = created_at (keep old)
+                     
+                     // Revised SQL construction:
+                     // We use named params or positional? Positional is safer but hard to construct dynamically in loop.
+                     // rusqlite doesn't support Vec<Box<dyn ToSql>> well directly in params!.
+                     // We need to construct a rusqlite::Params object dynamically.
+                     // Workaround: Use a loop to bind? No.
+                     // Best way: Use `rusqlite::params_from_iter`.
+                     
+                     // Correct Logic:
+                     // 1. Try Update
+                     // 2. If 0 rows, Insert
+                     
+                     // Let's stick to standard INSERT OR REPLACE / UPSERT logic but handle created_at.
+                     // The DO UPDATE clause for created_at is `created_at = created_at`.
+                     
+                     // RE-DOING construction for correctness with `params_from_iter`.
+                     let mut final_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+                     final_values.push(Box::new(id.clone())); // id
+                     
+                     let mut col_names = vec!["id".to_string(), "created_at".to_string(), "updated_at".to_string()];
+                     let mut placeholder_str = vec!["?1".to_string(), "strftime('%s','now')".to_string(), "strftime('%s','now')".to_string()];
+                     let mut update_assignments = vec!["updated_at = strftime('%s', 'now')".to_string()];
+
+                     let mut param_idx = 2; // ?1 is id.
+
+                     for (k, v) in map {
+                         col_names.push(quote_identifier(k));
+                         placeholder_str.push(format!("?{}", param_idx));
+                         update_assignments.push(format!("{} = ?{}", quote_identifier(k), param_idx));
+                         
+                         match v {
+                             Value::String(s) => final_values.push(Box::new(s.clone())),
+                             Value::Number(n) => {
+                                 if let Some(i) = n.as_i64() {
+                                     final_values.push(Box::new(i));
+                                 } else if let Some(f) = n.as_f64() {
+                                     final_values.push(Box::new(f));
+                                 } else {
+                                     final_values.push(Box::new(n.to_string()));
+                                 }
+                             },
+                             Value::Bool(b) => final_values.push(Box::new(if *b { 1 } else { 0 })),
+                             Value::Null => final_values.push(Box::new(rusqlite::types::Null)),
+                             _ => final_values.push(Box::new(v.to_string())),
+                         }
+                         param_idx += 1;
+                     }
+                     
+                     let sql = format!(
+                         "INSERT INTO {} ({}) VALUES ({})
+                          ON CONFLICT(id) DO UPDATE SET {}",
+                         table_name,
+                         col_names.join(", "),
+                         placeholder_str.join(", "),
+                         update_assignments.join(", ")
+                     );
+                     
+                     conn.execute(&sql, rusqlite::params_from_iter(final_values.iter()))
+                         .map_err(|e| StateError::InternalError(e.to_string()))?;
+                         
+                     return Ok(1);
+                },
+                _ => return Err(StateError::BadRequest("payload must be an object".to_string())),
+            }
+
+        }
 
         // Check current state for constraints
         let current: Option<(i64, bool)> = conn.query_row(
@@ -507,6 +936,52 @@ impl State for SqliteState {
         }
 
         let conn = self.conn.lock().unwrap();
+        
+        // CHECK IF MODEL EXISTS (Physical Table)
+        let is_model_defined: bool = conn.query_row(
+            "SELECT 1 FROM __models WHERE name = ?1",
+            params![resource_type],
+            |_| Ok(true),
+        ).unwrap_or(false);
+
+        if is_model_defined {
+             let table_name = quote_identifier(&resource_type);
+             
+             match resource_id {
+                 Some(id) => {
+                     // HARD DELETE for physical tables? Or Soft?
+                     // Standard dictates soft delete if "deleted" column exists.
+                     // But we didn't add "deleted" column in create_physical_table.
+                     // Let's do HARD DELETE for now as per MVP strictly typed.
+                     // Or should we have added "deleted" col?
+                     // Plan said: id, created_at, updated_at. No deleted.
+                     // So HARD DELETE.
+                     
+                     let sql = format!("DELETE FROM {} WHERE id = ?1", table_name);
+                     let count = conn.execute(&sql, params![id])
+                        .map_err(|e| StateError::InternalError(e.to_string()))?;
+                        
+                     if count == 0 {
+                          return Err(StateError::NotFound {
+                            resource_type: resource_type.to_string(),
+                            resource_id: id.to_string(),
+                        });
+                     }
+                     return Ok(count as u64);
+                 },
+                 None => {
+                     // Collection delete -> Delete all? Dangerous but consistent.
+                     let sql = format!("DELETE FROM {}", table_name);
+                     let count = conn.execute(&sql, [])
+                        .map_err(|e| StateError::InternalError(e.to_string()))?;
+                     return Ok(count as u64);
+                 }
+             }
+        }
+        
+        // Fallback to resources table using existing logic (moved inside match)
+        // We need to re-structure slightly or use the resource_id match.
+        
         match resource_id {
             Some(id) => {
                 // Check constraints
@@ -557,6 +1032,63 @@ impl State for SqliteState {
         self.conn.lock().unwrap().execute_batch(sql).map_err(|e| StateError::InternalError(e.to_string()))
     }
 
+    fn ensure_internal_user(&self, external_subject: &str, roles: &[String]) -> Result<String, StateError> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let roles_json = serde_json::to_string(roles).unwrap_or_else(|_| "[]".to_string());
+
+        // Upsert user: Insert if new, update roles if exists.
+        // We use returning ID to get the stable UUID.
+        
+        // 1. Try to find existing
+        let existing_id: Option<String> = conn.query_row(
+            "SELECT id FROM __internal_users WHERE external_subject = ?1",
+            params![external_subject],
+            |row| row.get(0),
+        ).optional().map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        if let Some(id) = existing_id {
+            // Update roles and timestamp? Maybe just roles.
+            conn.execute(
+                "UPDATE __internal_users SET roles = ?1 WHERE id = ?2",
+                params![roles_json, id],
+            ).map_err(|e| StateError::InternalError(e.to_string()))?;
+            Ok(id)
+        } else {
+            // Create new
+            let new_id = uuid::Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO __internal_users (id, external_subject, roles, status, created_at) VALUES (?1, ?2, ?3, 'active', ?4)",
+                params![new_id, external_subject, roles_json, now],
+            ).map_err(|e| StateError::InternalError(e.to_string()))?;
+            Ok(new_id)
+        }
+    }
+
+    fn get_resource_owner(&self, resource_type: &str, resource_id: &str) -> Result<Option<String>, StateError> {
+        let conn = self.conn.lock().unwrap();
+        
+        // 1. Check if model exists/is physical (via __models)
+        let is_model_defined: bool = conn.query_row(
+            "SELECT 1 FROM __models WHERE name = ?1",
+            params![resource_type],
+            |_| Ok(true),
+        ).unwrap_or(false);
+
+        if !is_model_defined {
+            return Ok(None);
+        }
+
+        let table_name = quote_identifier(resource_type);
+        // 2. Query owner_id
+        let owner: Option<String> = conn.query_row(
+            &format!("SELECT owner_id FROM {} WHERE id = ?1", table_name),
+            params![resource_id],
+            |row| row.get(0),
+        ).optional().map_err(|e| StateError::InternalError(e.to_string()))?;
+        
+        Ok(owner)
+    }
 
     fn capabilities(&self) -> &StateCapabilities {
         &self.capabilities

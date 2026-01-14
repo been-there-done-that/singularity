@@ -39,6 +39,11 @@ impl ExecutionContext {
         self.capability.cap_id()
     }
 
+    /// Get the internal user ID (if present).
+    pub fn internal_user_id(&self) -> Option<&str> {
+        self.capability.payload().internal_user_id.as_deref()
+    }
+
     /// Get the authorized operation.
     pub fn op(&self) -> &Opcode {
         self.capability.op()
