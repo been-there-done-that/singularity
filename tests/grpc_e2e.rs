@@ -65,7 +65,11 @@ async fn test_grpc_transport_flow() {
     let policy = PolicyEngine::new();
     let sys_policy = "true".to_string(); // Allow all
     let signer = CapabilitySigner::new(SigningKey::generate());
-    let state = SqliteState::in_memory().unwrap();
+    let mut state = SqliteState::in_memory().unwrap();
+    
+    // Run migrations
+    let migration_manager = singularity::migration::manager::MigrationManager::new();
+    migration_manager.run(&mut state).expect("migrations failed");
 
     let app_state = AppState::new(
         identity,
