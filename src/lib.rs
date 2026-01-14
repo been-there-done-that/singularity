@@ -26,6 +26,7 @@
 
 pub mod capability;
 pub mod execution;
+pub mod identity;
 pub mod policy;
 pub mod protocol;
 pub mod state;
