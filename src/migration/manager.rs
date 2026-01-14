@@ -15,6 +15,7 @@ impl MigrationManager {
         Self {
             migrations: vec![
                 Box::new(internal::V0Bootstrap),
+                Box::new(internal::V1SchemaMeta),
             ],
         }
     }
