@@ -15,14 +15,14 @@
  *   { op: 'schema.list', resource: { ... }, input: {} },
  *   async (token) => {
  *     const result = await execute(token, {});
- *     return result.data;
+ *     return result;
  *   }
  * );
  * ```
  */
 
 import { requestCapability, execute } from './pipeline';
-import type { OpRequest, ExecutionResult } from './types';
+import type { OpRequestInput } from './types';
 
 /**
  * Execute an operation within a scoped capability.
@@ -40,7 +40,7 @@ import type { OpRequest, ExecutionResult } from './types';
  * @returns The result from the executor, NOT the token
  */
 export async function withCapability<T>(
-    req: OpRequest,
+    req: OpRequestInput,
     executor: (token: string) => Promise<T>
 ): Promise<T> {
     // Phase 1: Request capability
@@ -59,12 +59,14 @@ export async function withCapability<T>(
  * Convenience wrapper that handles the common execute pattern.
  * 
  * For simple operations where you just need to call execute with a payload.
+ * Returns the kernel response directly (not wrapped).
  */
 export async function executeWithCapability<T>(
-    req: OpRequest,
+    req: OpRequestInput,
     payload: unknown = {}
-): Promise<ExecutionResult<T>> {
+): Promise<T> {
     return withCapability(req, async (token) => {
         return execute<T>(token, payload);
     });
 }
+

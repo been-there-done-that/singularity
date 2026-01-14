@@ -8,21 +8,20 @@
 
 	import { Button, EmptyState } from '$lib/ui';
 	import { auth } from '$lib/state/auth.svelte';
-	import { executeWithCapability } from '$lib/kernel';
+	import { executeWithCapability, KernelRequestError } from '$lib/kernel';
 
 	// Loading state
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
-	// Models from kernel (mock for now)
+	// Models from kernel
 	let models = $state<
 		Array<{
 			name: string;
-			owner: string;
+			owner_id: string;
 			isOwned: boolean;
 			isSystem: boolean;
 			fieldCount: number;
-			recordCount: number;
 		}>
 	>([]);
 
@@ -36,43 +35,36 @@
 		error = null;
 
 		try {
-			// TODO: Replace with actual kernel call
-			// const result = await executeWithCapability({
-			//   op: 'schema.list_models',
-			//   resource: { resource_type: '__models', resource_id: '*' },
-			//   input: {}
-			// });
-
-			// Mock data for UI development
-			await new Promise((r) => setTimeout(r, 500));
-			models = [
+			// Call kernel's schema.list_models op
+			// Returns the data directly (array of model records)
+			const rawModels = await executeWithCapability<Record<string, unknown>[]>(
 				{
-					name: 'todos',
-					owner: 'dev-user',
-					isOwned: true,
-					isSystem: false,
-					fieldCount: 5,
-					recordCount: 42
-				},
-				{
-					name: 'invoices',
-					owner: 'dev-user',
-					isOwned: true,
-					isSystem: false,
-					fieldCount: 8,
-					recordCount: 156
-				},
-				{
-					name: 'users',
-					owner: 'system',
-					isOwned: false,
-					isSystem: true,
-					fieldCount: 6,
-					recordCount: 3
+					op: 'schema.list_models',
+					resource: { resource_type: '__models', resource_id: null },
+					input: {}
 				}
-			];
+			);
+
+			// Map kernel response to UI model
+			// The kernel returns rows from __models table
+			const modelList = Array.isArray(rawModels) ? rawModels : [];
+			
+			models = modelList.map((m: Record<string, unknown>) => ({
+				name: String(m.name || m.id || 'unknown'),
+				owner_id: String(m.owner_id || ''),
+				isOwned: m.owner_id === auth.subject?.id,
+				isSystem: m.owner_id === 'system' || String(m.name).startsWith('__'),
+				fieldCount: typeof m.field_count === 'number' ? m.field_count : 0
+			}));
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to load models';
+			if (e instanceof KernelRequestError) {
+				// Translate kernel errors
+				error = e.code === 'POLICY_DENIED' 
+					? 'You do not have permission to view schemas'
+					: e.message;
+			} else {
+				error = e instanceof Error ? e.message : 'Failed to load models';
+			}
 		} finally {
 			loading = false;
 		}
@@ -178,7 +170,7 @@
 									{/if}
 								</div>
 								<p class="text-sm text-zinc-400">
-									{model.fieldCount} fields · {model.recordCount} records
+									{model.fieldCount} fields
 								</p>
 							</div>
 						</div>

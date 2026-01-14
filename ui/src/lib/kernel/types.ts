@@ -8,14 +8,24 @@
 // Resource identifier for capability scoping
 export interface Resource {
     resource_type: string;
-    resource_id: string;
+    resource_id: string | null; // null for collection operations
 }
 
 // Phase 1: Request capability (intent declaration)
-export interface OpRequest {
+// This is what callers provide (request_id and timestamp are auto-generated)
+export interface OpRequestInput {
     op: string;
     resource: Resource;
     input: unknown;
+}
+
+// Full OpRequest sent to kernel (includes auto-generated fields)
+export interface OpRequest {
+    request_id: string;
+    op: string;
+    resource: Resource;
+    input: unknown;
+    timestamp: number;
 }
 
 // Capability grant response from kernel

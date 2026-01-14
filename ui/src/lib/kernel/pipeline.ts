@@ -10,11 +10,19 @@
  */
 
 import { kernelFetch } from './http';
-import type { OpRequest, CapGrant, ExecutionResult } from './types';
+import type { OpRequestInput, OpRequest, CapGrant } from './types';
 import { auth } from '../state/auth.svelte';
+
+// Generate unique request ID
+function generateRequestId(): string {
+    return `req-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
 
 /**
  * Phase 1: Request a capability token for an operation.
+ * 
+ * The caller provides an OpRequestInput (no request_id/timestamp).
+ * This function adds the required fields before sending to kernel.
  * 
  * The kernel will:
  * 1. Verify the JWT
@@ -23,7 +31,16 @@ import { auth } from '../state/auth.svelte';
  * 
  * @throws KernelRequestError if policy denies the request
  */
-export async function requestCapability(req: OpRequest): Promise<CapGrant> {
+export async function requestCapability(input: OpRequestInput): Promise<CapGrant> {
+    // Build full OpRequest with auto-generated fields
+    const req: OpRequest = {
+        request_id: generateRequestId(),
+        op: input.op,
+        resource: input.resource,
+        input: input.input,
+        timestamp: Math.floor(Date.now() / 1000), // Unix seconds
+    };
+
     return kernelFetch<CapGrant>('/v1/op/request', {
         method: 'POST',
         body: req,
@@ -39,11 +56,16 @@ export async function requestCapability(req: OpRequest): Promise<CapGrant> {
  * 2. Check token expiration
  * 3. Execute within the token's scope
  * 
+ * The kernel returns the result directly (not wrapped):
+ * - Read ops: the data value (object, array, etc.)
+ * - Write ops: { rows_affected: number }
+ * - No-op: { status: "no-op" }
+ * 
  * @param token - The capability token from requestCapability
  * @param payload - Operation-specific payload
  */
-export async function execute<T>(token: string, payload: unknown): Promise<ExecutionResult<T>> {
-    return kernelFetch<ExecutionResult<T>>('/v1/op/execute', {
+export async function execute<T>(token: string, payload: unknown): Promise<T> {
+    return kernelFetch<T>('/v1/op/execute', {
         method: 'POST',
         body: { token, payload },
         jwt: auth.jwt
