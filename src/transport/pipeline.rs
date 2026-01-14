@@ -10,6 +10,7 @@ use crate::policy::{PolicyContext, PolicyEnv};
 use crate::protocol::{CapabilityPayload, FieldSet, OpExecute, OpRequest, CapGrant};
 use crate::transport::error::TransportError;
 use crate::transport::AppState;
+use crate::state::State;
 
 /// Core logic for `Request` operation.
 ///
@@ -26,14 +27,30 @@ pub fn process_request(
     // 1. Identity Verification
     let subject = app.identity.verify(identity_token, now)?;
 
-    // 2. Policy Evaluation
-    // Use resource directly from request (OpRequest owns Resource)
-    let policy_ctx = PolicyContext::new(
+    // 2. User Provisioning
+    let internal_id = app.state.ensure_internal_user(&subject.id, &subject.roles)
+        .map_err(|e| TransportError::Internal(format!("provisioning failed: {}", e)))?;
+
+    // Enrich subject with internal_id
+    let subject = subject.with_internal_id(internal_id);
+
+    // 3. Ownership Loading
+    let mut policy_ctx = PolicyContext::new(
         subject.clone(),
         request.resource.clone(),
         request.op.clone(),
         PolicyEnv::new(now),
     ).with_input(request.input.clone().unwrap_or(serde_json::Value::Null));
+
+    // If resource is an instance, try to load owner
+    if let Some(ref id) = request.resource.resource_id {
+        let owner = app.state.get_resource_owner(&request.resource.resource_type, id)
+             .map_err(|e| TransportError::Internal(format!("ownership verify failed: {}", e)))?;
+        
+        if let Some(owner_id) = owner {
+            policy_ctx = policy_ctx.with_resource_owner(owner_id);
+        }
+    }
 
     let allowed = app.policy.evaluate(&app.system_policy, &policy_ctx)
         .map_err(|_| TransportError::Internal("policy evaluation failed".into()))?;
@@ -55,6 +72,12 @@ pub fn process_request(
         now,
         now + 60, // 60s short lived token
     );
+
+    let cap_payload = if let Some(ref iid) = subject.internal_id {
+         cap_payload.with_internal_user_id(iid)
+    } else {
+         cap_payload
+    };
 
     let token = app.signer.mint(&cap_payload)
         .map_err(|e| TransportError::Internal(e.to_string()))?;

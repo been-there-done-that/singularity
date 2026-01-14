@@ -16,6 +16,7 @@ impl MigrationManager {
             migrations: vec![
                 Box::new(internal::V0Bootstrap),
                 Box::new(internal::V1SchemaMeta),
+                Box::new(internal::V2Ownership),
             ],
         }
     }

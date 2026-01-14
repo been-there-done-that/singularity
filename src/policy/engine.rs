@@ -137,6 +137,21 @@ impl PolicyEngine {
     fn build_scope<'a>(&self, ctx: &'a PolicyContext) -> Scope<'a> {
         let mut scope = Scope::new();
 
+        // Subject Map
+        let mut subject_map = rhai::Map::new();
+        subject_map.insert("id".into(), Dynamic::from(ctx.subject.id.clone()));
+        if let Some(ref iid) = ctx.subject.internal_id {
+             subject_map.insert("internal_id".into(), Dynamic::from(iid.clone()));
+        }
+        // Roles in subject map?
+         let roles_array_sub: rhai::Array = ctx.subject.roles
+            .iter()
+            .map(|r| Dynamic::from(r.clone()))
+            .collect();
+         subject_map.insert("roles".into(), Dynamic::from(roles_array_sub));
+         
+        scope.push_constant("subject", subject_map);
+
         // Subject fields (flat, for simplicity)
         scope.push_constant("subject_id", ctx.subject.id.clone());
         // Convert roles to Dynamic Array for contains() method
@@ -146,7 +161,19 @@ impl PolicyEngine {
             .collect();
         scope.push_constant("roles", roles_array);
 
-        // Resource fields
+        // Resource Map (simulated object)
+        let mut resource_map = rhai::Map::new();
+        resource_map.insert("type".into(), Dynamic::from(ctx.resource.resource_type.clone()));
+        resource_map.insert("id".into(), 
+            if let Some(ref id) = ctx.resource.resource_id { Dynamic::from(id.clone()) } else { Dynamic::UNIT }
+        );
+        
+        if let Some(ref owner) = ctx.resource_owner {
+             resource_map.insert("owner_id".into(), Dynamic::from(owner.clone()));
+        }
+        scope.push_constant("resource", resource_map);
+
+        // Keep flat constants for backward compat / ease of use?
         scope.push_constant("resource_type", ctx.resource.resource_type.clone());
         scope.push_constant(
             "resource_id",

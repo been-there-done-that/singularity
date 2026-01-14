@@ -31,6 +31,9 @@ pub struct CapabilityPayload {
     /// Optional binding (nonce/IP).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bind: Option<CapabilityBinding>,
+    /// Internal User ID (for ownership attribution).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub internal_user_id: Option<String>,
 }
 
 impl CapabilityPayload {
@@ -60,7 +63,14 @@ impl CapabilityPayload {
             expires_at,
             constraints: None,
             bind: None,
+            internal_user_id: None,
         }
+    }
+
+    /// Set internal user ID for ownership tracking.
+    pub fn with_internal_user_id(mut self, internal_user_id: impl Into<String>) -> Self {
+        self.internal_user_id = Some(internal_user_id.into());
+        self
     }
 
     /// Set constraints on the capability.

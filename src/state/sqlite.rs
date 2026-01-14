@@ -15,6 +15,7 @@ use super::capabilities::StateCapabilities;
 use super::error::StateError;
 use super::traits::State;
 use crate::schema::validation::{validate_identifier, quote_identifier};
+use uuid::Uuid;
 
 /// SQLite state backend.
 ///
@@ -347,6 +348,7 @@ impl SqliteState {
         let sql = format!(
             "CREATE TABLE IF NOT EXISTS {} (
                 id TEXT PRIMARY KEY,
+                owner_id TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             ) STRICT;", 
@@ -905,6 +907,63 @@ impl State for SqliteState {
         self.conn.lock().unwrap().execute_batch(sql).map_err(|e| StateError::InternalError(e.to_string()))
     }
 
+    fn ensure_internal_user(&self, external_subject: &str, roles: &[String]) -> Result<String, StateError> {
+        let conn = self.conn.lock().unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let roles_json = serde_json::to_string(roles).unwrap_or_else(|_| "[]".to_string());
+
+        // Upsert user: Insert if new, update roles if exists.
+        // We use returning ID to get the stable UUID.
+        
+        // 1. Try to find existing
+        let existing_id: Option<String> = conn.query_row(
+            "SELECT id FROM __internal_users WHERE external_subject = ?1",
+            params![external_subject],
+            |row| row.get(0),
+        ).optional().map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        if let Some(id) = existing_id {
+            // Update roles and timestamp? Maybe just roles.
+            conn.execute(
+                "UPDATE __internal_users SET roles = ?1 WHERE id = ?2",
+                params![roles_json, id],
+            ).map_err(|e| StateError::InternalError(e.to_string()))?;
+            Ok(id)
+        } else {
+            // Create new
+            let new_id = uuid::Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO __internal_users (id, external_subject, roles, status, created_at) VALUES (?1, ?2, ?3, 'active', ?4)",
+                params![new_id, external_subject, roles_json, now],
+            ).map_err(|e| StateError::InternalError(e.to_string()))?;
+            Ok(new_id)
+        }
+    }
+
+    fn get_resource_owner(&self, resource_type: &str, resource_id: &str) -> Result<Option<String>, StateError> {
+        let conn = self.conn.lock().unwrap();
+        
+        // 1. Check if model exists/is physical (via __models)
+        let is_model_defined: bool = conn.query_row(
+            "SELECT 1 FROM __models WHERE name = ?1",
+            params![resource_type],
+            |_| Ok(true),
+        ).unwrap_or(false);
+
+        if !is_model_defined {
+            return Ok(None);
+        }
+
+        let table_name = quote_identifier(resource_type);
+        // 2. Query owner_id
+        let owner: Option<String> = conn.query_row(
+            &format!("SELECT owner_id FROM {} WHERE id = ?1", table_name),
+            params![resource_id],
+            |row| row.get(0),
+        ).optional().map_err(|e| StateError::InternalError(e.to_string()))?;
+        
+        Ok(owner)
+    }
 
     fn capabilities(&self) -> &StateCapabilities {
         &self.capabilities

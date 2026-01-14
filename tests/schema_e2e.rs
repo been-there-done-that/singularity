@@ -16,7 +16,8 @@ fn create_context(op: &str, resource: Resource) -> ExecutionContext {
     let signing_key = SigningKey::generate();
     let signer = CapabilitySigner::new(signing_key);
     let verifier = CapabilityVerifier::new(signer.verifying_key());
-    let payload = CapabilityPayload::new("test", op, resource, FieldSet::all(), 0, 60);
+    let payload = CapabilityPayload::new("test", op, resource, FieldSet::all(), 0, 60)
+        .with_internal_user_id("test-user-uuid");
     let token = signer.mint(&payload).unwrap();
     let verified = verifier.verify(&token, 30).unwrap();
     ExecutionContext::new(verified)

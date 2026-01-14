@@ -100,10 +100,19 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
             // CREATE operations
             "resource.create" | "user.create" | "document.create" | 
             "schema.create_model" | "schema.add_field" => {
-                let payload = payload.ok_or_else(|| ExecutionError::ConstraintViolation {
+                let mut payload = payload.ok_or_else(|| ExecutionError::ConstraintViolation {
                     constraint: "payload".to_string(),
                     reason: "create requires payload".to_string(),
                 })?;
+
+                // Inject owner_id if authenticated and missing
+                if let Some(owner) = ctx.internal_user_id() {
+                    if let Some(obj) = payload.as_object_mut() {
+                        if !obj.contains_key("owner_id") {
+                            obj.insert("owner_id".into(), serde_json::json!(owner));
+                        }
+                    }
+                }
 
                 // 2. Validate write fields BEFORE state
                 ctx.validate_write_fields(&payload)?;
