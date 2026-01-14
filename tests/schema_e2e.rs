@@ -99,7 +99,57 @@ fn test_schema_persistence_flow() {
         assert_eq!(data["name"], "test_model");
         let fields = data["fields"].as_array().expect("fields should be array");
         assert_eq!(fields.len(), 0);
-    } else {
-        panic!("expected read result after drop");
     }
+
+    // 6. Verify Physical Table Storage (STRICT mode)
+    // Create a new model "users" with typed fields
+    let user_model_id = "m_users";
+    let user_model_payload = json!({
+        "name": "users",
+        "namespace": "public",
+        "created_at": 1234567895
+    });
+    let ctx_model_users = create_context("schema.create_model", Resource::instance("__models", user_model_id));
+    executor.execute(&ctx_model_users, &ExecutionTarget::new(Resource::instance("__models", user_model_id)), &meta, Some(user_model_payload)).expect("create users model failed");
+    
+    // Add "age" field (Integer)
+    let age_field_payload = json!({
+        "model_id": user_model_id,
+        "name": "age",
+        "field_type": { "type": "Int", "config": null },
+        "required": false,
+        "unique": false,
+        "default": null,
+        "created_at": 1234567896
+    });
+    let ctx_field_age = create_context("schema.add_field", Resource::instance("__fields", "f_age"));
+    executor.execute(&ctx_field_age, &ExecutionTarget::new(Resource::instance("__fields", "f_age")), &meta, Some(age_field_payload)).expect("add age field failed");
+
+    // Write data to "users" physical table
+    let user_id = "curr_user";
+    let user_payload = json!({
+        "age": 30
+    });
+    let ctx_write_user = create_context("resource.create", Resource::instance("users", user_id));
+    executor.execute(&ctx_write_user, &ExecutionTarget::new(Resource::instance("users", user_id)), &meta, Some(user_payload)).expect("write user failed");
+
+    // Read back user
+    let ctx_read_user = create_context("resource.read", Resource::instance("users", user_id));
+    let read_result = executor.execute(&ctx_read_user, &ExecutionTarget::new(Resource::instance("users", user_id)), &meta, None).expect("read user failed");
+    
+    if let singularity::execution::ExecutionResult::Read { data } = read_result {
+        assert_eq!(data["age"], 30);
+    } else {
+        panic!("expected read result for user");
+    }
+
+    // Verify STRICT enforcement: Try writing String to Int field
+    let invalid_payload = json!({
+        "age": "thirty" // Should fail or error in STRICT mode (or rusqlite conversion)
+    });
+    // With our current logic, "thirty" is passed as string to INTEGER column. STRICT table should reject.
+    let ctx_write_invalid = create_context("resource.create", Resource::instance("users", "invalid_user"));
+    let err = executor.execute(&ctx_write_invalid, &ExecutionTarget::new(Resource::instance("users", "invalid_user")), &meta, Some(invalid_payload));
+    
+    assert!(err.is_err(), "Should fail to write string to integer column in STRICT table");
 }

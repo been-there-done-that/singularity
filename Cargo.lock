@@ -1481,6 +1481,7 @@ dependencies = [
  "prost",
  "prost-types",
  "rand",
+ "regex",
  "rhai",
  "rusqlite",
  "serde",
