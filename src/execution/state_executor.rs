@@ -57,6 +57,9 @@ impl From<StateError> for ExecutionError {
             StateError::InternalError(e) => {
                 ExecutionError::StorageError(e)
             }
+            StateError::BadRequest(msg) => {
+                ExecutionError::BadRequest(msg)
+            }
         }
     }
 }
@@ -95,7 +98,8 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
             }
 
             // CREATE operations
-            "resource.create" | "user.create" | "document.create" => {
+            "resource.create" | "user.create" | "document.create" | 
+            "schema.create_model" | "schema.add_field" => {
                 let payload = payload.ok_or_else(|| ExecutionError::ConstraintViolation {
                     constraint: "payload".to_string(),
                     reason: "create requires payload".to_string(),
@@ -137,7 +141,8 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
             }
 
             // DELETE operations
-            "resource.delete" | "user.delete" | "document.delete" => {
+            "resource.delete" | "user.delete" | "document.delete" |
+            "schema.drop_field" => {
                 let count = self.state.delete(
                     target,
                     constraints.as_ref(),
