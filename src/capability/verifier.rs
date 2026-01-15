@@ -256,7 +256,7 @@ impl CapabilityVerifier {
 mod tests {
     use super::*;
     use crate::capability::{CapabilitySigner, SigningKey};
-    use crate::protocol::CapabilityBinding;
+    use crate::protocol::{CapabilityBinding, opcode::*};
 
     fn setup_signer_verifier() -> (CapabilitySigner, CapabilityVerifier) {
         let signing_key = SigningKey::generate();
@@ -270,7 +270,7 @@ mod tests {
     fn create_test_payload(issued_at: u64, expires_at: u64) -> CapabilityPayload {
         CapabilityPayload::new(
             "cap-test-001",
-            "resource.read",
+            RESOURCE_READ,
             Resource::instance("user", "123"),
             FieldSet::new(["name", "email"]),
             issued_at,
@@ -292,7 +292,7 @@ mod tests {
 
         let verified = result.unwrap();
         assert_eq!(verified.cap_id(), "cap-test-001");
-        assert_eq!(verified.op().as_str(), "resource.read");
+        assert_eq!(verified.op().as_str(), RESOURCE_READ);
     }
 
     #[test]
@@ -401,7 +401,7 @@ mod tests {
 
         let result = verifier.verify_for_execution(
             &token,
-            &Opcode::new("resource.read"),
+            &Opcode::new(RESOURCE_READ),
             &Resource::instance("user", "123"),
             &FieldSet::new(["name"]),
             None,
@@ -421,7 +421,7 @@ mod tests {
 
         let result = verifier.verify_for_execution(
             &token,
-            &Opcode::new("resource.delete"), // Wrong operation
+            &Opcode::new(RESOURCE_DELETE), // Wrong operation
             &Resource::instance("user", "123"),
             &FieldSet::new(["name"]),
             None,
@@ -441,7 +441,7 @@ mod tests {
 
         let result = verifier.verify_for_execution(
             &token,
-            &Opcode::new("resource.read"),
+            &Opcode::new(RESOURCE_READ),
             &Resource::instance("document", "123"), // Wrong resource type
             &FieldSet::new(["name"]),
             None,
@@ -461,7 +461,7 @@ mod tests {
 
         let result = verifier.verify_for_execution(
             &token,
-            &Opcode::new("resource.read"),
+            &Opcode::new(RESOURCE_READ),
             &Resource::instance("user", "456"), // Wrong resource ID
             &FieldSet::new(["name"]),
             None,
@@ -481,7 +481,7 @@ mod tests {
 
         let result = verifier.verify_for_execution(
             &token,
-            &Opcode::new("resource.read"),
+            &Opcode::new(RESOURCE_READ),
             &Resource::instance("user", "123"),
             &FieldSet::new(["password"]), // Unauthorized field
             None,
@@ -500,7 +500,7 @@ mod tests {
         // Payload with wildcard fields
         let payload = CapabilityPayload::new(
             "cap-all-fields",
-            "resource.read",
+            RESOURCE_READ,
             Resource::instance("user", "123"),
             FieldSet::all(),
             1704067200,
@@ -511,7 +511,7 @@ mod tests {
         // Should allow any field
         let result = verifier.verify_for_execution(
             &token,
-            &Opcode::new("resource.read"),
+            &Opcode::new(RESOURCE_READ),
             &Resource::instance("user", "123"),
             &FieldSet::new(["any_field", "another_field"]),
             None,
@@ -531,7 +531,7 @@ mod tests {
 
         let payload = CapabilityPayload::new(
             "cap-bound",
-            "resource.read",
+            RESOURCE_READ,
             Resource::instance("user", "123"),
             FieldSet::all(),
             1704067200,
@@ -543,7 +543,7 @@ mod tests {
 
         let result = verifier.verify_for_execution(
             &token,
-            &Opcode::new("resource.read"),
+            &Opcode::new(RESOURCE_READ),
             &Resource::instance("user", "123"),
             &FieldSet::empty(),
             Some("nonce-xyz"), // Correct nonce
@@ -561,7 +561,7 @@ mod tests {
 
         let payload = CapabilityPayload::new(
             "cap-bound",
-            "resource.read",
+            RESOURCE_READ,
             Resource::instance("user", "123"),
             FieldSet::all(),
             1704067200,
@@ -573,7 +573,7 @@ mod tests {
 
         let result = verifier.verify_for_execution(
             &token,
-            &Opcode::new("resource.read"),
+            &Opcode::new(RESOURCE_READ),
             &Resource::instance("user", "123"),
             &FieldSet::empty(),
             Some("wrong-nonce"), // Wrong nonce
@@ -591,7 +591,7 @@ mod tests {
 
         let payload = CapabilityPayload::new(
             "cap-bound",
-            "resource.read",
+            RESOURCE_READ,
             Resource::instance("user", "123"),
             FieldSet::all(),
             1704067200,
@@ -603,7 +603,7 @@ mod tests {
 
         let result = verifier.verify_for_execution(
             &token,
-            &Opcode::new("resource.read"),
+            &Opcode::new(RESOURCE_READ),
             &Resource::instance("user", "123"),
             &FieldSet::empty(),
             None, // Nonce required but not provided
@@ -621,7 +621,7 @@ mod tests {
 
         let payload = CapabilityPayload::new(
             "cap-ip-bound",
-            "resource.read",
+            RESOURCE_READ,
             Resource::instance("user", "123"),
             FieldSet::all(),
             1704067200,
@@ -633,7 +633,7 @@ mod tests {
 
         let result = verifier.verify_for_execution(
             &token,
-            &Opcode::new("resource.read"),
+            &Opcode::new(RESOURCE_READ),
             &Resource::instance("user", "123"),
             &FieldSet::empty(),
             None,
@@ -651,7 +651,7 @@ mod tests {
 
         let payload = CapabilityPayload::new(
             "cap-ip-bound",
-            "resource.read",
+            RESOURCE_READ,
             Resource::instance("user", "123"),
             FieldSet::all(),
             1704067200,
@@ -663,7 +663,7 @@ mod tests {
 
         let result = verifier.verify_for_execution(
             &token,
-            &Opcode::new("resource.read"),
+            &Opcode::new(RESOURCE_READ),
             &Resource::instance("user", "123"),
             &FieldSet::empty(),
             None,
@@ -686,7 +686,7 @@ mod tests {
         let verified = verifier.verify(&token, now).unwrap();
 
         assert_eq!(verified.cap_id(), "cap-test-001");
-        assert_eq!(verified.op().as_str(), "resource.read");
+        assert_eq!(verified.op().as_str(), RESOURCE_READ);
         assert_eq!(verified.resource().resource_type, "user");
         assert_eq!(verified.resource().resource_id.as_deref(), Some("123"));
         assert!(verified.fields().contains("name"));

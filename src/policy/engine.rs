@@ -406,13 +406,13 @@ fn json_to_dynamic(value: &serde_json::Value) -> Dynamic {
 mod tests {
     use super::*;
     use crate::policy::context::{PolicyEnv, PolicySubject};
-    use crate::protocol::Resource;
+    use crate::protocol::{Resource, opcode::*};
 
     fn create_test_context() -> PolicyContext {
         let subject = PolicySubject::new("user-123").with_roles(["admin", "viewer"]);
         let resource = Resource::instance("document", "doc-456");
         let env = PolicyEnv::new(1704067200);
-        PolicyContext::new(subject, resource, "resource.read", env)
+        PolicyContext::new(subject, resource, RESOURCE_READ, env)
     }
 
     // ==================== Basic Evaluation Tests ====================
@@ -461,7 +461,7 @@ mod tests {
         let engine = PolicyEngine::new();
         let ctx = create_test_context();
 
-        let result = engine.evaluate(r#"op == "resource.read""#, &ctx);
+        let result = engine.evaluate(&format!(r#"op == "{}""#, RESOURCE_READ), &ctx);
         assert_eq!(result.unwrap(), true);
     }
 
@@ -508,13 +508,13 @@ mod tests {
         let engine = PolicyEngine::new();
         let ctx = create_test_context();
 
-        let policy = r#"
-            let is_read = op == "resource.read";
+        let policy = format!(r#"
+            let is_read = op == "{}";
             let is_viewer = roles.contains("viewer");
             is_read && is_viewer
-        "#;
+        "#, RESOURCE_READ);
 
-        let result = engine.evaluate(policy, &ctx);
+        let result = engine.evaluate(&policy, &ctx);
         assert_eq!(result.unwrap(), true);
     }
     
@@ -591,7 +591,7 @@ mod tests {
         let subject = PolicySubject::new("user-123").with_roles(["admin"]);
         let resource = Resource::instance("document", "doc-456");
         let env = PolicyEnv::new(1704067200);
-        let ctx = PolicyContext::new(subject, resource, "resource.update", env)
+        let ctx = PolicyContext::new(subject, resource, RESOURCE_UPDATE, env)
             .with_input(serde_json::json!({"amount": 100}));
 
         let result = engine.evaluate("input.amount <= 1000", &ctx);
@@ -608,7 +608,7 @@ mod tests {
         let subject = PolicySubject::new("ext-1").with_internal_id(internal_id);
         let resource = Resource::instance("doc", "doc-1");
         let env = PolicyEnv::new(0);
-        let ctx = PolicyContext::new(subject, resource, "resource.read", env)
+        let ctx = PolicyContext::new(subject, resource, RESOURCE_READ, env)
             .with_resource_owner(internal_id);
 
         // Default policy (None) should allow owner
@@ -631,7 +631,7 @@ mod tests {
         let subject = PolicySubject::new("ext-2").with_internal_id("other-user");
         let resource = Resource::instance("doc", "doc-1");
         let env = PolicyEnv::new(0);
-        let ctx = PolicyContext::new(subject, resource, "resource.read", env)
+        let ctx = PolicyContext::new(subject, resource, RESOURCE_READ, env)
             .with_resource_owner("internal-user-1");
 
         // Default policy (None) should deny non-owner
@@ -653,7 +653,7 @@ mod tests {
             .with_roles(["admin"]);
         let resource = Resource::instance("doc", "doc-1");
         let env = PolicyEnv::new(0);
-        let ctx = PolicyContext::new(subject, resource, "resource.read", env)
+        let ctx = PolicyContext::new(subject, resource, RESOURCE_READ, env)
             .with_resource_owner("internal-user-1");
 
         // Policy that allows admin bypass
@@ -674,7 +674,7 @@ mod tests {
         let subject = PolicySubject::new("user-1");
         let resource = Resource::instance("doc", "doc-1");
         let env = PolicyEnv::new(0);
-        let ctx = PolicyContext::new(subject, resource, "resource.read", env);
+        let ctx = PolicyContext::new(subject, resource, RESOURCE_READ, env);
 
         // Invalid policy that returns non-boolean
         let decision = engine.evaluate_with_explanation(Some("42"), &ctx);
@@ -698,11 +698,11 @@ mod tests {
         let subject = PolicySubject::new("user-1").with_internal_id("int-1");
         let resource = Resource::instance("document", "doc-1");
         let env = PolicyEnv::new(0);
-        let ctx = PolicyContext::new(subject, resource, "document.update", env)
+        let ctx = PolicyContext::new(subject, resource, DOCUMENT_UPDATE, env)
             .with_resource_owner("int-1");
 
         let decision = engine.evaluate_with_explanation(None, &ctx);
 
-        assert_eq!(decision.op, "document.update");
+        assert_eq!(decision.op, DOCUMENT_UPDATE);
     }
 }
