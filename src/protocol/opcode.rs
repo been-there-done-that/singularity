@@ -141,6 +141,19 @@ pub const OBJECT_DELETE: &str = "object.delete";
 pub const OBJECT_LIST: &str = "object.list";
 pub const OBJECT_PRESIGN: &str = "object.presign";
 
+// Data Plane Opcodes (Policy-Aware)
+// These replace resource.* with full DSL support
+/// Query with filters, joins, ordering
+pub const DATA_QUERY: &str = "data.query";
+/// Count matching rows
+pub const DATA_COUNT: &str = "data.count";
+/// Insert single or bulk rows
+pub const DATA_INSERT: &str = "data.insert";
+/// Update with WHERE filter
+pub const DATA_UPDATE: &str = "data.update";
+/// Delete with WHERE filter
+pub const DATA_DELETE: &str = "data.delete";
+
 #[cfg(test)]
 mod tests {
     use super::*;

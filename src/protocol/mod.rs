@@ -5,6 +5,7 @@
 //! - `CapGrant` - Capability grant response containing signed token
 //! - `OpExecute` - Execution request (consumes opaque capability token)
 
+pub mod data;
 mod execute;
 mod grant;
 pub mod opcode;
@@ -16,3 +17,4 @@ pub use grant::{CapGrant, CapabilityPayload, CapabilityToken};
 pub use opcode::Opcode;
 pub use request::OpRequest;
 pub use types::{CapabilityBinding, FieldSet, Resource};
+
