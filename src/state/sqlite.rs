@@ -1102,6 +1102,28 @@ impl State for SqliteState {
         Ok(owner)
     }
 
+    fn get_schema_version(&self) -> Result<Option<u64>, StateError> {
+        let conn = self.conn.lock().unwrap();
+        // Check table exists via sqlite_master
+        let exists: bool = conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='__schema_version'",
+            [],
+            |_| Ok(true)
+        ).unwrap_or(false);
+
+        if !exists {
+            return Ok(None);
+        }
+
+        let version_nested: Option<Option<u64>> = conn.query_row(
+            "SELECT MAX(version) FROM __schema_version",
+            [],
+            |row| row.get(0)
+        ).optional().map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        Ok(version_nested.flatten())
+    }
+
     fn capabilities(&self) -> &StateCapabilities {
         &self.capabilities
     }
