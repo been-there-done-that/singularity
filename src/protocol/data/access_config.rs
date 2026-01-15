@@ -49,6 +49,16 @@ impl RowScopeType {
             _ => Self::Deny, // Safe default
         }
     }
+
+    /// Convert to database string.
+    pub fn to_db_str(&self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::All => "all",
+            Self::Predicate { .. } => "predicate",
+            Self::Deny => "deny",
+        }
+    }
 }
 
 impl Default for RowScopeType {
