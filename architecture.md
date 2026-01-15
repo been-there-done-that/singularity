@@ -235,6 +235,7 @@ Transports:
 6. **No user-defined SQL**
 7. **No silent schema widening**
 8. **No long-lived authority tokens**
+9. **Every CapabilityToken MUST contain explicit RowPredicate** (RLS is default-on)
 
 Violating any invariant is a **bug**, not a feature.
 
