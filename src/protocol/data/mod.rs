@@ -15,16 +15,22 @@
 //! - **Safe defaults** - bulk ops require WHERE, have max_rows
 
 mod access_config;
+mod access_ops;
 mod filter;
 mod grant;
 mod mutation;
 mod query;
 
 pub use access_config::{AccessProfile, PrincipalType, RowScopeType, ScopeSource};
+pub use access_ops::{
+    AccessProfileError, AccessProfileInput, AccessProfileListOutput, AccessProfileOutput,
+    AccessProfileUpdate,
+};
 pub use filter::{FilterOp, FilterValidationError, FilterValue};
 pub use grant::{
     BulkGrant, DataAction, FieldMask, JoinGrant, PlanGrant, RowPredicate,
 };
 pub use mutation::{DeleteInput, InsertInput, UpdateInput};
 pub use query::{JoinSpec, JoinType, OrderDir, OrderSpec, QueryInput};
+
 

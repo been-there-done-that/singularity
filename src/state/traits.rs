@@ -168,6 +168,40 @@ pub trait State: SchemaView + Send + Sync {
         subject_id: Option<&str>,
     ) -> Result<ExecutionResult, StateError>;
 
+    // =========================================================================
+    // Access Profile CRUD (Admin-only, Control-plane)
+    // =========================================================================
+
+    /// Create an access profile.
+    fn create_access_profile(
+        &self,
+        input: &crate::protocol::data::AccessProfileInput,
+        now: u64,
+    ) -> Result<String, StateError>;
+
+    /// List access profiles for a model.
+    fn list_access_profiles(
+        &self,
+        model_id: &str,
+    ) -> Result<Vec<crate::protocol::data::AccessProfileOutput>, StateError>;
+
+    /// Get a specific access profile.
+    fn get_access_profile(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::protocol::data::AccessProfileOutput>, StateError>;
+
+    /// Update an access profile.
+    fn update_access_profile(
+        &self,
+        id: &str,
+        updates: &crate::protocol::data::AccessProfileUpdate,
+        now: u64,
+    ) -> Result<(), StateError>;
+
+    /// Delete an access profile.
+    fn delete_access_profile(&self, id: &str) -> Result<(), StateError>;
+
 }
 
 #[cfg(test)]
