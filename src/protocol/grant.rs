@@ -38,6 +38,9 @@ pub struct CapabilityPayload {
     /// Executor asserts this matches to prevent mismatched plan/grant reuse.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_hash: Option<String>,
+    /// Subject roles (e.g. ["admin", "user"]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<String>>,
 }
 
 
@@ -70,6 +73,7 @@ impl CapabilityPayload {
             bind: None,
             internal_user_id: None,
             plan_hash: None,
+            roles: None,
         }
     }
 
@@ -78,6 +82,13 @@ impl CapabilityPayload {
         self.internal_user_id = Some(internal_user_id.into());
         self
     }
+
+    /// Set subject roles.
+    pub fn with_roles(mut self, roles: Vec<String>) -> Self {
+        self.roles = Some(roles);
+        self
+    }
+
 
     /// Set plan hash for plan/grant binding.
     /// Executor asserts this matches to prevent mismatched reuse.

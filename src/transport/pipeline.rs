@@ -179,7 +179,9 @@ pub fn process_request(
          cap_payload.with_internal_user_id(iid)
     } else {
          cap_payload
-    };
+    }
+    .with_roles(subject.roles.clone());
+
 
     let token = app.signer.mint(&cap_payload)
         .map_err(|e| TransportError::Internal(e.to_string()))?;

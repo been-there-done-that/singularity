@@ -44,6 +44,17 @@ impl ExecutionContext {
         self.capability.payload().internal_user_id.as_deref()
     }
 
+    /// Get the subject roles.
+    pub fn roles(&self) -> Option<&[String]> {
+        self.capability.payload().roles.as_deref()
+    }
+
+    /// Check if the subject has a specific role.
+    pub fn has_role(&self, role: &str) -> bool {
+        self.roles().map_or(false, |roles| roles.iter().any(|r| r == role))
+    }
+
+
     /// Get the authorized operation.
     pub fn op(&self) -> &Opcode {
         self.capability.op()
