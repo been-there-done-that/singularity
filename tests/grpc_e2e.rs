@@ -1,4 +1,6 @@
 //! End-to-end tests for Transport Layer (gRPC).
+//!
+//! Tests the gRPC transport with real session authentication.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,20 +10,18 @@ use tonic::Request;
 use serde_json::json;
 
 use singularity::capability::{CapabilitySigner, SigningKey};
-use singularity::identity::{JwtVerifier, StandardClaims};
+use singularity::identity::JwtVerifier;
 use singularity::policy::PolicyEngine;
 use singularity::state::SqliteState;
 use singularity::transport::AppState;
 use singularity::transport::grpc::GrpcServer;
 use singularity::transport::grpc::pb::singularity_client::SingularityClient;
 use singularity::transport::grpc::pb::{OpRequestProto, ResourceProto, OpExecuteProto};
+use singularity::transport::http::app;
+use axum::{body::Body, http::Request as AxumRequest, http::StatusCode};
 
-// Helper to convert JSON -> Prost Struct manually for test client
+// Helper to convert JSON -> Prost Struct
 fn json_to_struct(v: serde_json::Value) -> prost_types::Struct {
-    // We can use the helper from the server logic if we expose it, or rewrite it briefly.
-    // For test, we can just use simple logic or even just empty/basic.
-    // Ideally we reuse the logic. But it's private in server.rs.
-    // I will rewrite a simple recursive one here.
     from_json(v)
 }
 
@@ -55,10 +55,10 @@ fn json_val_to_proto(v: serde_json::Value) -> prost_types::Value {
 #[tokio::test]
 async fn test_grpc_transport_flow() {
     // 1. Setup Components
-    let jwt_secret = b"grpc-test-secret";
+    let jwt_secret = b"grpc-test-secret-key-32-chars!";
     let identity = Arc::new(JwtVerifier::with_hmac_secret(
-        "https://grpc.test",
-        "singularity-grpc",
+        "https://singularity.local",
+        "singularity",
         jwt_secret.to_vec(),
     ));
 
@@ -80,14 +80,35 @@ async fn test_grpc_transport_flow() {
         jwt_secret.to_vec(),
     );
 
-    // 2. Start gRPC Server
+    // 2. Get a real JWT via HTTP register (need to start HTTP for this)
+    let http_app = app(app_state.clone());
+    
+    let register_body = json!({
+        "username": "grpcuser",
+        "password": "testpassword123",
+        "device_name": "grpc-test"
+    });
+
+    let register_req = AxumRequest::builder()
+        .uri("/auth/register")
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_string(&register_body).unwrap()))
+        .unwrap();
+
+    let register_resp = tower::util::ServiceExt::oneshot(http_app, register_req).await.unwrap();
+    assert_eq!(register_resp.status(), StatusCode::OK);
+
+    let register_bytes = axum::body::to_bytes(register_resp.into_body(), 2048).await.unwrap();
+    let auth_response: serde_json::Value = serde_json::from_slice(&register_bytes).unwrap();
+    let jwt = auth_response["token"].as_str().unwrap().to_string();
+
+    // 3. Start gRPC Server
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     let grpc_service = GrpcServer::new(app_state);
     
-    // We need to adapt our GrpcServer (which implements Singularity) to tonic service.
-    // Imports:
     use singularity::transport::grpc::pb::singularity_server::SingularityServer;
     
     let server_future = Server::builder()
@@ -99,38 +120,11 @@ async fn test_grpc_transport_flow() {
     // Wait for server to start
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // 3. Connect Client
-    // tonic::transport::Channel::from_shared(...).connect()...
+    // 4. Connect Client
     let uri = format!("http://{}", addr);
     let mut client = SingularityClient::connect(uri).await.unwrap();
 
-    // 4. Prepare Identity Token
-    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-    
-    let claims = StandardClaims {
-        sub: "user-grpc".to_string(),
-        sid: Some("session-grpc".to_string()),
-        skh: Some("hash-grpc".to_string()),
-        roles: vec!["admin".to_string()],
-        groups: vec![],
-        email: None,
-        name: None,
-        iat: Some(now),
-        exp: Some(now + 3600),
-        nbf: Some(now),
-        iss: Some("https://grpc.test".to_string()),
-        aud: Some(serde_json::json!("singularity-grpc")),
-    };
-    
-    let jwt = encode(
-        &Header::new(Algorithm::HS256),
-        &claims,
-        &EncodingKey::from_secret(jwt_secret)
-    ).unwrap();
-
-
-    // 5. Call Request
+    // 5. Call Request with real JWT
     let req = OpRequestProto {
         request_id: "req-grpc-1".to_string(),
         op: "resource.create".to_string(),

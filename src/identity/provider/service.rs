@@ -49,6 +49,8 @@ pub enum AuthError {
     SessionRevoked,
     #[error("session not found")]
     SessionNotFound,
+    #[error("session key mismatch")]
+    SessionKeyMismatch,
     #[error("password error: {0}")]
     Password(#[from] PasswordError),
     #[error("storage error: {0}")]
@@ -108,6 +110,44 @@ impl IdentityService {
     /// Build the external subject from an auth user ID.
     fn external_subject(auth_user_id: &str) -> String {
         format!("auth:{}", auth_user_id)
+    }
+
+    /// Verify a session is valid.
+    ///
+    /// Called on EVERY authenticated request. No caching. No shortcuts.
+    ///
+    /// Checks:
+    /// 1. Session exists
+    /// 2. Not revoked (revoked_at IS NULL)
+    /// 3. skh matches session_key_hash
+    pub fn verify_session(
+        &self,
+        state: &SqliteState,
+        session_id: &str,
+        session_key_hash: &str,
+    ) -> Result<(), AuthError> {
+        // 1. Lookup session
+        let session: Result<(String, Option<i64>), AuthError> = state.with_connection(|conn| {
+            conn.query_row(
+                "SELECT session_key_hash, revoked_at FROM __auth_sessions WHERE id = ?1 LIMIT 1",
+                params![session_id],
+                |row| Ok((row.get(0)?, row.get(1)?))
+            ).map_err(|_| AuthError::SessionNotFound)
+        });
+
+        let (stored_hash, revoked_at) = session?;
+
+        // 2. Check not revoked (revocation always wins)
+        if revoked_at.is_some() {
+            return Err(AuthError::SessionRevoked);
+        }
+
+        // 3. Verify session key hash (proof of possession)
+        if stored_hash != session_key_hash {
+            return Err(AuthError::SessionKeyMismatch);
+        }
+
+        Ok(())
     }
 
     /// Create a session and issue JWT atomically.
