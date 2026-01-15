@@ -4,6 +4,7 @@
     import FieldSelector from '$lib/explorer/FieldSelector.svelte';
     import ResultsTable from '$lib/explorer/ResultsTable.svelte';
     import PaginationFooter from '$lib/explorer/PaginationFooter.svelte';
+    import InsertDialog from '$lib/explorer/InsertDialog.svelte';
     import type { QueryInput, Row, ExecutionMode } from '$lib/dsl/types';
 
     // -- State --
@@ -27,6 +28,8 @@
     let executionMode = $state<ExecutionMode | null>(null);
     let error = $state<string | null>(null);
     let showDsl = $state(false);
+    let showInsert = $state(false);
+    let insertLoading = $state(false);
 
     // -- Actions --
 
@@ -135,6 +138,35 @@
         }
     }
 
+    async function handleInsertSave(data: any) {
+        if (!model) return;
+        insertLoading = true;
+        error = null;
+        
+        try {
+            const input = {
+                rows: [data],
+                returning: ['id']
+            };
+            
+            const grant = await requestCapability({
+                op: 'data.insert',
+                resource: { resource_type: model, resource_id: null },
+                input
+            });
+            
+            await execute(grant.token, input);
+            
+            showInsert = false;
+            runQuery(); // Refresh data
+        } catch (e: any) {
+            console.error('Insert failed:', e);
+            error = e.message || 'Insert failed';
+        } finally {
+            insertLoading = false;
+        }
+    }
+
 </script>
 
 <div class="h-screen flex flex-col bg-black text-zinc-300 font-sans overflow-hidden">
@@ -168,6 +200,12 @@
                 <!-- Filters Bar (Placeholder) -->
                 <div class="h-12 border-b border-zinc-800 flex items-center px-4 gap-4 bg-zinc-900/30">
                    <div class="text-xs text-zinc-500 italic">Filter builder coming in v0.2</div>
+                   <button 
+                        class="ml-auto flex items-center gap-2 px-3 py-1.5 bg-emerald-600/10 hover:bg-emerald-600/20 text-emerald-400 border border-emerald-600/30 rounded text-xs font-medium transition-colors"
+                        onclick={() => showInsert = true}
+                   >
+                        <span class="text-sm">+</span> Insert
+                   </button>
                 </div>
 
                 <!-- Results -->
@@ -205,5 +243,14 @@
             <div class="text-xs opacity-90">{error}</div>
             <button class="absolute top-1 right-1 p-1 hover:bg-red-800 rounded" onclick={() => error = null}>✕</button>
         </div>
+    {/if}
+
+    {#if showInsert}
+        <InsertDialog
+            {fields}
+            loading={insertLoading}
+            onClose={() => showInsert = false}
+            onSave={handleInsertSave}
+        />
     {/if}
 </div>
