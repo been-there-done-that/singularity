@@ -349,7 +349,7 @@ impl SqliteState {
                     }
                 } else {
                     // Collection Read
-                    let mut sql = "SELECT id, model_id, name, field_type, required, unique_flag, default_val, created_at FROM __fields".to_string();
+                    let mut sql = "SELECT id, model_id, name, field_type, required, unique_flag, default_val, created_at, owner_id FROM __fields".to_string();
                     let mut where_clauses = Vec::new();
                     let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
@@ -386,6 +386,7 @@ impl SqliteState {
                             "unique": row.get::<_, i64>(5)? != 0,
                             "default": default_str.map(|s| serde_json::from_str::<Value>(&s).unwrap_or(Value::Null)),
                             "created_at": row.get::<_, i64>(7)?,
+                            "owner_id": row.get::<_, Option<String>>(8)?,
                         }))
                     }).map_err(|e| StateError::InternalError(e.to_string()))?;
 
@@ -474,7 +475,7 @@ impl SqliteState {
                     }
 
                     // Fetch fields
-                    let mut fields_stmt = conn.prepare("SELECT id, name, field_type, required, unique_flag, default_val, created_at FROM __fields WHERE model_id = ?1")
+                    let mut fields_stmt = conn.prepare("SELECT id, name, field_type, required, unique_flag, default_val, created_at, owner_id FROM __fields WHERE model_id = ?1")
                         .map_err(|e| StateError::InternalError(e.to_string()))?;
                     let fields_iter = fields_stmt.query_map(params![model_id], |row| {
                         let f_type_str: String = row.get(2)?;
@@ -488,6 +489,7 @@ impl SqliteState {
                             "unique": row.get::<_, i64>(4)? != 0,
                             "default": default_str.map(|s| serde_json::from_str::<Value>(&s).unwrap_or(Value::Null)),
                             "created_at": row.get::<_, i64>(6)?,
+                            "owner_id": row.get::<_, Option<String>>(7)?,
                         }))
                     }).map_err(|e| StateError::InternalError(e.to_string()))?;
 
@@ -1063,6 +1065,11 @@ impl State for SqliteState {
         let (resource_type, resource_id) = Self::state_key(target);
 
         let id = resource_id.unwrap_or_else(|| {
+            if resource_type == "__fields" {
+                if let (Some(m_id), Some(f_name)) = (payload.get("model_id").and_then(|v| v.as_str()), payload.get("name").and_then(|v| v.as_str())) {
+                    return format!("{}-{}", m_id, f_name);
+                }
+            }
             // Generate ID for new resources
             format!("{:016x}", rand::random::<u64>())
         });
@@ -1867,6 +1874,62 @@ mod tests {
             }
             _ => panic!("Expected ConstraintViolation with specific reason, got: {:?}", result),
         }
+    }
+
+    #[test]
+    fn test_schema_add_field_id_format() {
+        let mut state = create_state();
+        let migration_manager = crate::migration::manager::MigrationManager::new();
+        migration_manager.run(&mut state).unwrap();
+        
+        // 1. Create a model
+        let _ = state.write(
+            &create_target("__models", None),
+            &FieldSet::all(),
+            &json!({
+                "name": "posts",
+                "namespace": "public",
+                "owner_id": "creator_1"
+            }),
+            None
+        ).unwrap();
+
+        // 2. Add a field via collection write (like schema.add_field)
+        // Fetch the generated model ID from the model name
+        let models = state.read(
+            &create_target("__models", None),
+            &FieldSet::all(),
+            Some(&json!({ "name": "posts" }))
+        ).unwrap();
+        let model_id = models[0]["id"].as_str().unwrap().to_string();
+
+        state.write(
+            &create_target("__fields", None),
+            &FieldSet::all(),
+            &json!({
+                "model_id": model_id,
+                "name": "title",
+                "field_type": { "type": "String" },
+                "required": true,
+                "unique": false,
+                "owner_id": "creator_1"
+            }),
+            None
+        ).unwrap();
+
+        // 3. Verify ID format
+        // The ID should be {model_id}-title
+        let fields = state.read(
+            &create_target("__fields", None),
+            &FieldSet::all(),
+            Some(&json!({ "model_id": model_id, "name": "title" }))
+        ).unwrap();
+
+        let field_list = fields.as_array().unwrap();
+        let title_field = field_list.iter().find(|f| f["name"] == "title").expect("field not found");
+        
+        assert_eq!(title_field["id"], format!("{}-title", model_id));
+        assert_eq!(title_field["owner_id"], "creator_1");
     }
 }
 
