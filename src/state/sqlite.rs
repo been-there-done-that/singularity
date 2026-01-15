@@ -937,7 +937,7 @@ impl State for SqliteState {
                          updates.push(format!("{} = excluded.{}", quote_identifier(k), quote_identifier(k)));
                      }
 
-                     let sql = format!(
+                     let _sql = format!(
                          "INSERT INTO {} ({}) VALUES ({})
                           ON CONFLICT(id) DO UPDATE SET {}",
                          table_name,
@@ -1245,6 +1245,150 @@ impl State for SqliteState {
             ).map_err(|e| StateError::InternalError(e.to_string()))?;
             Ok(new_id)
         }
+    }
+
+    fn count(
+        &self,
+        target: &ExecutionTarget,
+        constraints: Option<&Value>,
+    ) -> Result<u64, StateError> {
+        let (resource_type, _) = Self::state_key(target);
+
+        // Internal tables count
+        if resource_type.starts_with("__") {
+             let conn = self.conn.lock().unwrap();
+             // Safe because internal tables are known safe
+             let count: u64 = conn.query_row(
+                 &format!("SELECT COUNT(*) FROM {}", resource_type),
+                 [],
+                 |row| row.get(0)
+             ).map_err(|e| StateError::InternalError(e.to_string()))?;
+             return Ok(count);
+        }
+
+        let conn = self.conn.lock().unwrap();
+        
+        // CHECK IF MODEL EXISTS (Physical Table)
+        let is_model_defined: bool = conn.query_row(
+            "SELECT 1 FROM __models WHERE name = ?1",
+            params![resource_type],
+            |_| Ok(true),
+        ).unwrap_or(false);
+
+        if is_model_defined {
+             let table_name = quote_identifier(&resource_type);
+             let sql = format!("SELECT COUNT(*) FROM {}", table_name);
+             
+             let mut where_clauses = Vec::new();
+             let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+             
+             if let Some(c) = constraints {
+                 if let Some(owner) = c.get("owner_id").and_then(|v| v.as_str()) {
+                     where_clauses.push("owner_id = ?");
+                     params_vec.push(Box::new(owner.to_string()));
+                 }
+             }
+
+             let final_sql = if where_clauses.is_empty() {
+                 sql
+             } else {
+                 format!("{} WHERE {}", sql, where_clauses.join(" AND "))
+             };
+
+             let mut stmt = conn.prepare(&final_sql).map_err(|e| StateError::InternalError(e.to_string()))?;
+             
+             let count: u64 = if params_vec.is_empty() {
+                 stmt.query_row([], |row| row.get(0))
+             } else {
+                 stmt.query_row(rusqlite::params_from_iter(params_vec.iter()), |row| row.get(0))
+             }.map_err(|e| StateError::InternalError(e.to_string()))?;
+
+             return Ok(count);
+        }
+        
+        // Fallback to resources table (only non-deleted)
+        let sql = "SELECT COUNT(*) FROM resources WHERE resource_type = ?1 AND deleted = 0";
+        let count: u64 = conn.query_row(
+            sql,
+            params![resource_type],
+            |row| row.get(0)
+        ).map_err(|e| StateError::InternalError(e.to_string()))?;
+        
+        Ok(count)
+    }
+
+    fn rename_table(&self, old_name: &str, new_name: &str) -> Result<(), StateError> {
+        let conn = self.conn.lock().unwrap();
+        
+        // validate names
+        validate_identifier(old_name).map_err(StateError::BadRequest)?;
+        validate_identifier(new_name).map_err(StateError::BadRequest)?;
+
+        // 1. Rename in __models
+        let changed = conn.execute(
+            "UPDATE __models SET name = ?1 WHERE name = ?2",
+            params![new_name, old_name]
+        ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        if changed == 0 {
+            return Err(StateError::NotFound { 
+                resource_type: "__models".into(), 
+                resource_id: old_name.into() 
+            });
+        }
+
+        // 2. Rename physical table
+        let old_tbl = quote_identifier(old_name);
+        let new_tbl = quote_identifier(new_name);
+        
+        conn.execute(
+            &format!("ALTER TABLE {} RENAME TO {}", old_tbl, new_tbl),
+            []
+        ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    fn rename_column(&self, table: &str, old_col: &str, new_col: &str) -> Result<(), StateError> {
+        let conn = self.conn.lock().unwrap();
+
+        validate_identifier(table).map_err(StateError::BadRequest)?;
+        validate_identifier(old_col).map_err(StateError::BadRequest)?;
+        validate_identifier(new_col).map_err(StateError::BadRequest)?;
+
+        // 1. Get model_id
+        let model_id: String = conn.query_row(
+            "SELECT id FROM __models WHERE name = ?1",
+            params![table],
+            |row| row.get(0)
+        ).map_err(|_| StateError::BadRequest(format!("Model {} not found", table)))?;
+
+        // 2. Rename in __fields
+        let changed = conn.execute(
+            "UPDATE __fields SET name = ?1 WHERE model_id = ?2 AND name = ?3",
+            params![new_col, model_id, old_col]
+        ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        if changed == 0 {
+             // Check if it's a system field (id, created_at, etc)?
+             // Or just return NotFound
+            return Err(StateError::NotFound { 
+                resource_type: "__fields".into(), 
+                resource_id: old_col.into() 
+            });
+        }
+
+        // 3. Rename physical column
+        let tbl = quote_identifier(table);
+        let old_c = quote_identifier(old_col);
+        let new_c = quote_identifier(new_col);
+
+        conn.execute(
+            &format!("ALTER TABLE {} RENAME COLUMN {} TO {}", tbl, old_c, new_c),
+            []
+        ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        Ok(())
     }
 
     fn get_resource_owner(&self, resource_type: &str, resource_id: &str) -> Result<Option<String>, StateError> {

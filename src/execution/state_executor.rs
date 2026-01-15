@@ -411,6 +411,86 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                 })
             }
 
+            // COUNT operations
+            "resource.count" => {
+                // Owner filtering constraints
+                let mut exec_constraints = serde_json::Map::new();
+                if let Some(user_id) = ctx.internal_user_id() {
+                     exec_constraints.insert("owner_id".to_string(), serde_json::json!(user_id));
+                }
+                let c_val = if !exec_constraints.is_empty() {
+                    Some(serde_json::Value::Object(exec_constraints))
+                } else {
+                    None
+                };
+
+                let count = self.state.count(target, c_val.as_ref())?;
+                Ok(ExecutionResult::Read { 
+                    data: serde_json::json!({ "count": count }) 
+                })
+            }
+
+            // SCHEMA RENAME operations
+            "schema.rename_model" => {
+                let payload = payload.ok_or(ExecutionError::BadRequest("Missing payload".into()))?;
+                let old_name = payload.get("old_name").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("Missing old_name".into()))?;
+                let new_name = payload.get("new_name").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("Missing new_name".into()))?;
+                
+                // Idempotency: if already renamed (old doesn't exist, new exists), consider success?
+                // Or let State handle it? State returns NotFound if old doesn't exist.
+                // User requirement: "renaming to same name -> no-op"
+                if old_name == new_name {
+                    return Ok(ExecutionResult::NoOp);
+                }
+
+                // Check ownership/permissions?
+                // Schema ops usually need admin or ownership. 
+                // Capability should enforce this. If user has capability, they can do it.
+                // Strict: check if user owns the model? System models?
+                // For v0, explicit capability is enough.
+
+                match self.state.rename_table(old_name, new_name) {
+                    Ok(_) => Ok(ExecutionResult::NoOp),
+                    Err(StateError::NotFound { .. }) => {
+                        // Check if new_name exists (already renamed?)
+                         let _check_target = ExecutionTarget::new(crate::protocol::Resource::collection(new_name));
+                         // If we can count it, it exists? Or check __models.
+                         // Use __models read
+                         let _model_target = ExecutionTarget::new(crate::protocol::Resource::instance("__models", new_name)); // ID is usually same as name or UUID? 
+                         // Wait, in write implementation: `id` is passed.
+                         // `rename_table` uses `name`.
+                         // `State::rename_table` implementation checks `__models WHERE name = ?`. 
+                         
+                         // If we really want to support idempotency efficiently, we'd need to know if the failure was because 
+                         // "From" doesn't exist. If "From" missing, maybe "To" exists?
+                         // For now, let's just propagate error. The UI can handle 404.
+                         // Or we can do a check.
+                         Err(ExecutionError::ResourceNotFound { resource_type: "Model".into(), resource_id: old_name.into() })
+                    },
+                    Err(e) => Err(ExecutionError::from(e)),
+                }
+            }
+
+            "schema.rename_field" => {
+                let payload = payload.ok_or(ExecutionError::BadRequest("Missing payload".into()))?;
+                let table = payload.get("model").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("Missing model".into()))?;
+                let old_col = payload.get("old_name").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("Missing old_name".into()))?;
+                let new_col = payload.get("new_name").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("Missing new_name".into()))?;
+
+                if old_col == new_col {
+                     return Ok(ExecutionResult::NoOp);
+                }
+
+                match self.state.rename_column(table, old_col, new_col) {
+                    Ok(_) => Ok(ExecutionResult::NoOp),
+                    // Handle idempotency similar to rename_model if needed
+                     Err(StateError::NotFound { .. }) => {
+                         Err(ExecutionError::ResourceNotFound { resource_type: "Field".into(), resource_id: old_col.into() })
+                     },
+                     Err(e) => Err(ExecutionError::from(e)),
+                }
+            }
+
             // Unknown operation
             _ => Err(ExecutionError::OperationNotSupported(op.to_string())),
         }

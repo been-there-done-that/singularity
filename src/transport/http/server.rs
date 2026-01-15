@@ -12,7 +12,7 @@ use axum::http::Method;
 
 use crate::transport::AppState;
 use super::handlers::{handle_execute, handle_request};
-use super::auth_handlers::{handle_login, handle_register, handle_logout};
+use super::auth_handlers::{handle_login, handle_register, handle_logout, handle_me};
 use super::health::handle_healthz;
 
 /// Create the Axum router.
@@ -28,6 +28,7 @@ pub fn app(state: AppState) -> Router {
         .route("/auth/login", post(handle_login))
         .route("/auth/register", post(handle_register))
         .route("/auth/logout", post(handle_logout))
+        .route("/auth/me", get(handle_me))
         // Intent declaration: JWT -> Capability
         .route("/v1/op/request", post(handle_request))
         // Execution: Capability -> State Change

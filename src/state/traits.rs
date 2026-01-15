@@ -128,6 +128,32 @@ pub trait State: Send + Sync {
     /// Get current schema version.
     /// Returns None if version table doesn't exist.
     fn get_schema_version(&self) -> Result<Option<u64>, StateError>;
+
+    /// Count resource(s) matching target and constraints.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - Resource to count
+    /// * `constraints` - Optional CAS-style constraints
+    ///
+    /// # Returns
+    ///
+    /// * Number of matching resources
+    fn count(
+        &self,
+        target: &ExecutionTarget,
+        constraints: Option<&serde_json::Value>,
+    ) -> Result<u64, StateError>;
+
+    /// Rename a table (model).
+    ///
+    /// Used for schema evolution. Backends should support this atomically.
+    fn rename_table(&self, old_name: &str, new_name: &str) -> Result<(), StateError>;
+
+    /// Rename a column (field).
+    ///
+    /// Used for schema evolution. Backends should support this atomically.
+    fn rename_column(&self, table: &str, old_col: &str, new_col: &str) -> Result<(), StateError>;
 }
 
 #[cfg(test)]
