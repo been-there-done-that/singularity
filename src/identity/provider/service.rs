@@ -51,6 +51,8 @@ pub enum AuthError {
     SessionNotFound,
     #[error("session key mismatch")]
     SessionKeyMismatch,
+    #[error("bootstrap required")]
+    BootstrapRequired,
     #[error("password error: {0}")]
     Password(#[from] PasswordError),
     #[error("storage error: {0}")]
@@ -61,8 +63,9 @@ pub enum AuthError {
 
 /// Request to register a new user.
 /// 
-/// NOTE: No roles field - users always start as ["user"].
-/// Admin promotion is a separate privileged operation.
+/// NOTE: No roles field - roles are determined by bootstrap state.
+/// During bootstrap (first user): admin if correct code provided.
+/// After bootstrap: always "user".
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct RegisterRequest {
     pub username: String,
@@ -71,6 +74,9 @@ pub struct RegisterRequest {
     /// Optional device name for session tracking
     #[serde(default)]
     pub device_name: Option<String>,
+    /// Bootstrap code (required for first admin registration)
+    #[serde(default)]
+    pub bootstrap_code: Option<String>,
 }
 
 /// Request to login.
@@ -157,6 +163,7 @@ impl IdentityService {
         auth_user_id: &str,
         email: Option<String>,
         device_name: Option<String>,
+        roles: Vec<String>,
     ) -> Result<AuthResponse, AuthError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -179,7 +186,6 @@ impl IdentityService {
 
         // Issue JWT with session binding
         let external_sub = Self::external_subject(auth_user_id);
-        let roles = vec!["user".to_string()];
 
         let token = self.jwt_issuer
             .issue(&external_sub, &session_id, &session_key_hash, roles, email)
@@ -249,8 +255,75 @@ impl IdentityService {
             )
         }).map_err(|e| AuthError::Storage(e.to_string()))?;
 
-        // 5. Create session and issue JWT
-        self.create_session_and_jwt(state, &auth_user_id, req.email, req.device_name)
+        // 5. Create session and issue JWT (default to user role)
+        self.create_session_and_jwt(state, &auth_user_id, req.email, req.device_name, vec!["user".to_string()])
+    }
+
+    /// Register a new user with explicit roles.
+    /// 
+    /// Used by bootstrap flow to create admin user.
+    pub fn register_with_roles(
+        &self, 
+        state: &SqliteState, 
+        req: RegisterRequest,
+        roles: Vec<String>,
+    ) -> Result<AuthResponse, AuthError> {
+        // 1. Check if username exists
+        let exists = state.with_connection(|conn| {
+            conn.query_row(
+                "SELECT 1 FROM __auth_users WHERE username = ?1 LIMIT 1",
+                params![&req.username],
+                |_| Ok(true)
+            ).unwrap_or(false)
+        });
+        
+        if exists {
+            return Err(AuthError::UsernameExists);
+        }
+
+        // 2. Check if email exists (if provided)
+        if let Some(ref email) = req.email {
+            let email_exists = state.with_connection(|conn| {
+                conn.query_row(
+                    "SELECT 1 FROM __auth_users WHERE email = ?1 LIMIT 1",
+                    params![email],
+                    |_| Ok(true)
+                ).unwrap_or(false)
+            });
+            
+            if email_exists {
+                return Err(AuthError::EmailExists);
+            }
+        }
+
+        // 3. Hash password
+        let password_hash = hash_password(&req.password)?;
+
+        // 4. Create auth user
+        let auth_user_id = Uuid::new_v4().to_string();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        // Insert into __auth_users
+        state.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO __auth_users (id, username, email, email_verified, created_at) VALUES (?1, ?2, ?3, 0, ?4)",
+                params![&auth_user_id, &req.username, &req.email, now]
+            )
+        }).map_err(|e| AuthError::Storage(e.to_string()))?;
+
+        // Insert into __auth_secrets
+        state.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO __auth_secrets (user_id, password_hash, updated_at) VALUES (?1, ?2, ?3)",
+                params![&auth_user_id, &password_hash, now]
+            )
+        }).map_err(|e| AuthError::Storage(e.to_string()))?;
+
+        // 5. Create session and issue JWT with specified roles
+        self.create_session_and_jwt(state, &auth_user_id, req.email.clone(), req.device_name, roles)
     }
 
     /// Login with username and password.
@@ -283,7 +356,7 @@ impl IdentityService {
         }
 
         // 4. Create session and issue JWT
-        self.create_session_and_jwt(state, &auth_user_id, email, req.device_name)
+        self.create_session_and_jwt(state, &auth_user_id, email, req.device_name, vec!["user".to_string()])
     }
 
     /// Revoke a session (logout).
