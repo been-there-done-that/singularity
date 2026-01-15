@@ -18,6 +18,7 @@ impl MigrationManager {
                 Box::new(internal::V1SchemaMeta),
                 Box::new(internal::V2Ownership),
                 Box::new(internal::V3Auth),
+                Box::new(internal::V4IndexOwnership),
             ],
         }
     }

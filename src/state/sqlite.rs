@@ -439,6 +439,70 @@ impl SqliteState {
                     })
                 }
             },
+            "__indexes" => {
+                if let Some(id) = id {
+                    // Instance Read
+                    let mut stmt = conn.prepare("SELECT id, model_id, name, fields, unique_flag, created_at, owner_id FROM __indexes WHERE id = ?1")
+                        .map_err(|e| StateError::InternalError(e.to_string()))?;
+                    if let Some(row) = stmt.query_row(params![id], |row| {
+                        let fields_str: String = row.get(3)?;
+                        Ok(json!({
+                            "id": row.get::<_, String>(0)?,
+                            "model_id": row.get::<_, String>(1)?,
+                            "name": row.get::<_, String>(2)?,
+                            "fields": serde_json::from_str::<Value>(&fields_str).unwrap_or(json!([])),
+                            "unique": row.get::<_, i64>(4)? != 0,
+                            "created_at": row.get::<_, i64>(5)?,
+                            "owner_id": row.get::<_, Option<String>>(6)?,
+                        }))
+                    }).optional().map_err(|e| StateError::InternalError(e.to_string()))? {
+                        Ok(row)
+                    } else {
+                        Err(StateError::NotFound {
+                            resource_type: resource_type.to_string(),
+                            resource_id: id.to_string(),
+                        })
+                    }
+                } else {
+                    // Collection Read
+                    let mut sql = "SELECT id, model_id, name, fields, unique_flag, created_at, owner_id FROM __indexes".to_string();
+                    let mut where_clauses = Vec::new();
+                    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+                    if let Some(c) = constraints {
+                        if let Some(model_id) = c.get("model_id").and_then(|v| v.as_str()) {
+                            where_clauses.push(format!("model_id = ?{}", params_vec.len() + 1));
+                            params_vec.push(Box::new(model_id.to_string()));
+                        }
+                        if let Some(owner_id) = c.get("owner_id").and_then(|v| v.as_str()) {
+                            where_clauses.push(format!("owner_id = ?{}", params_vec.len() + 1));
+                            params_vec.push(Box::new(owner_id.to_string()));
+                        }
+                    }
+
+                    if !where_clauses.is_empty() {
+                        sql.push_str(" WHERE ");
+                        sql.push_str(&where_clauses.join(" AND "));
+                    }
+
+                    let mut stmt = conn.prepare(&sql).map_err(|e| StateError::InternalError(e.to_string()))?;
+                    let rows = stmt.query_map(rusqlite::params_from_iter(params_vec.iter()), |row| {
+                        let fields_str: String = row.get(3)?;
+                        Ok(json!({
+                            "id": row.get::<_, String>(0)?,
+                            "model_id": row.get::<_, String>(1)?,
+                            "name": row.get::<_, String>(2)?,
+                            "fields": serde_json::from_str::<Value>(&fields_str).unwrap_or(json!([])),
+                            "unique": row.get::<_, i64>(4)? != 0,
+                            "created_at": row.get::<_, i64>(5)?,
+                            "owner_id": row.get::<_, Option<String>>(6)?,
+                        }))
+                    }).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+                    let indexes: Vec<Value> = rows.filter_map(Result::ok).collect();
+                    Ok(json!(indexes))
+                }
+            },
             _ => Err(StateError::NotFound {
                  resource_type: resource_type.to_string(),
                  resource_id: id.unwrap_or("collection").to_string(),
@@ -494,6 +558,24 @@ impl SqliteState {
                     }).map_err(|e| StateError::InternalError(e.to_string()))?;
 
                     let fields: Vec<Value> = fields_iter.filter_map(Result::ok).collect();
+
+                    // Fetch indexes
+                    let mut idx_stmt = conn.prepare("SELECT id, name, fields, unique_flag, created_at, owner_id FROM __indexes WHERE model_id = ?1")
+                        .map_err(|e| StateError::InternalError(e.to_string()))?;
+                    let idx_iter = idx_stmt.query_map(params![model_id], |row| {
+                        let fields_str: String = row.get(2)?;
+                        Ok(json!({
+                            "id": row.get::<_, String>(0)?,
+                            "name": row.get::<_, String>(1)?,
+                            "fields": serde_json::from_str::<Value>(&fields_str).unwrap_or(json!([])),
+                            "unique": row.get::<_, i64>(3)? != 0,
+                            "created_at": row.get::<_, i64>(4)?,
+                            "owner_id": row.get::<_, Option<String>>(5)?,
+                        }))
+                    }).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+                    let indexes: Vec<Value> = idx_iter.filter_map(Result::ok).collect();
+
                     let display_owner = owner_sub.or(owner_uuid).unwrap_or_else(|| "system".to_string());
 
                     Ok(json!({
@@ -502,7 +584,8 @@ impl SqliteState {
                         "namespace": row.get::<_, String>(2).unwrap(),
                         "created_at": row.get::<_, i64>(3).unwrap(),
                         "owner_id": display_owner,
-                        "fields": fields
+                        "fields": fields,
+                        "indexes": indexes
                     }))
                 } else {
                     Err(StateError::NotFound {
@@ -721,9 +804,54 @@ impl SqliteState {
                 conn.execute(
                     "INSERT INTO __object_namespaces (id, name, owner_id, backend, root_path, created_at) 
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                     ON CONFLICT(id) DO UPDATE SET name=excluded.name, owner_id=excluded.owner_id, backend=excluded.backend, root_path=excluded.root_path",
+                     ON CONFLICT(id) DO UPDATE SET name=excluded.name, owner_id=excluded.owner_id, backend=excluded.backend, root_path=excluded.root_path, created_at=excluded.created_at",
                     params![id, name, owner_id, backend, root_path, created_at],
                 ).map_err(|e| StateError::InternalError(e.to_string()))?;
+                Ok(1)
+            },
+            "__indexes" => {
+                let model_id = data["model_id"].as_str().ok_or(StateError::BadRequest("missing model_id".to_string()))?;
+                let name = data["name"].as_str().ok_or(StateError::BadRequest("missing name".to_string()))?;
+                let fields_val = &data["fields"];
+                let fields_str = serde_json::to_string(fields_val).unwrap();
+                let unique = data["unique"].as_bool().unwrap_or(false);
+                let created_at = data["created_at"].as_i64().unwrap_or(0);
+                let owner_id = data["owner_id"].as_str().unwrap_or("");
+
+                // Fetch model name needed for physical table
+                let model_name: String = conn.query_row(
+                    "SELECT name FROM __models WHERE id = ?1",
+                    params![model_id],
+                    |row| row.get(0),
+                ).map_err(|_| StateError::BadRequest(format!("model {} not found", model_id)))?;
+
+                // Fetch field names from field IDs
+                let fields_array = fields_val.as_array().ok_or(StateError::BadRequest("fields must be an array".to_string()))?;
+                let mut field_names = Vec::new();
+                for f_id in fields_array {
+                    let f_id_str = f_id.as_str().ok_or(StateError::BadRequest("field ID must be a string".to_string()))?;
+                    let f_name: String = conn.query_row(
+                        "SELECT name FROM __fields WHERE id = ?1",
+                        params![f_id_str],
+                        |row| row.get(0),
+                    ).map_err(|_| StateError::BadRequest(format!("field {} not found", f_id_str)))?;
+                    field_names.push(f_name);
+                }
+
+                conn.execute(
+                    "INSERT INTO __indexes (id, model_id, name, fields, unique_flag, created_at, owner_id) 
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(id) DO UPDATE SET 
+                        name=excluded.name, 
+                        fields=excluded.fields,
+                        unique_flag=excluded.unique_flag,
+                        owner_id=excluded.owner_id",
+                    params![id, model_id, name, fields_str, if unique { 1 } else { 0 }, created_at, owner_id],
+                ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+                // Create physical index
+                drop(conn);
+                self.create_physical_index(&model_name, name, &field_names, unique)?;
                 Ok(1)
             },
             _ => Err(StateError::BadRequest(format!("cannot write to internal table {}", resource_type))),
@@ -805,6 +933,51 @@ impl SqliteState {
         Ok(())
     }
 
+    /// Drop a physical table.
+    fn drop_physical_table(&self, model_name: &str) -> Result<(), StateError> {
+        validate_identifier(model_name).map_err(StateError::BadRequest)?;
+        let table_name = quote_identifier(model_name);
+        let sql = format!("DROP TABLE IF EXISTS {};", table_name);
+        self.conn.lock().unwrap().execute(&sql, [])
+            .map_err(|e| StateError::InternalError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Create a physical index.
+    fn create_physical_index(&self, model_name: &str, index_name: &str, field_names: &[String], unique: bool) -> Result<(), StateError> {
+        validate_identifier(model_name).map_err(StateError::BadRequest)?;
+        validate_identifier(index_name).map_err(StateError::BadRequest)?;
+        for f in field_names {
+            validate_identifier(f).map_err(StateError::BadRequest)?;
+        }
+
+        let table_name = quote_identifier(model_name);
+        let physical_index_name = quote_identifier(&format!("idx_{}_{}", model_name, index_name));
+        let columns = field_names.iter().map(|f| quote_identifier(f)).collect::<Vec<_>>().join(", ");
+        
+        let unique_clause = if unique { "UNIQUE" } else { "" };
+        let sql = format!("CREATE {} INDEX IF NOT EXISTS {} ON {} ({});", unique_clause, physical_index_name, table_name, columns);
+        
+        self.conn.lock().unwrap().execute(&sql, [])
+            .map_err(|e| StateError::InternalError(e.to_string()))?;
+        
+        Ok(())
+    }
+
+    /// Drop a physical index.
+    fn drop_physical_index(&self, model_name: &str, index_name: &str) -> Result<(), StateError> {
+        validate_identifier(model_name).map_err(StateError::BadRequest)?;
+        validate_identifier(index_name).map_err(StateError::BadRequest)?;
+
+        let physical_index_name = quote_identifier(&format!("idx_{}_{}", model_name, index_name));
+        let sql = format!("DROP INDEX IF EXISTS {};", physical_index_name);
+        
+        self.conn.lock().unwrap().execute(&sql, [])
+            .map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        Ok(())
+    }
+
     fn delete_internal(&self, resource_type: &str, id: &str) -> Result<u64, StateError> {
         let conn = self.conn.lock().unwrap();
         match resource_type {
@@ -836,10 +1009,46 @@ impl SqliteState {
             // Cannot delete models or internal users via this API yet/ever?
             // Models deletion should cascade from __models, but maybe safe to expose.
             "__models" => {
-                 let count = conn.execute(
+                // Get model name before deleting
+                let model_name: String = conn.query_row(
+                    "SELECT name FROM __models WHERE id = ?1",
+                    params![id],
+                    |row| row.get(0),
+                ).map_err(|_| StateError::BadRequest(format!("model {} not found", id)))?;
+
+                let count = conn.execute(
                     "DELETE FROM __models WHERE id = ?1",
                     params![id],
                 ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+                // Cascade drop physical table
+                drop(conn);
+                let _ = self.drop_physical_table(&model_name);
+                Ok(count as u64)
+            },
+            "__indexes" => {
+                // Get model name and index name before deleting
+                let (model_id, name): (String, String) = conn.query_row(
+                    "SELECT model_id, name FROM __indexes WHERE id = ?1",
+                    params![id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ).map_err(|_| StateError::BadRequest(format!("index {} not found", id)))?;
+
+                let model_name: String = conn.query_row(
+                    "SELECT name FROM __models WHERE id = ?1",
+                    params![model_id],
+                    |row| row.get(0),
+                ).map_err(|_| StateError::BadRequest(format!("model {} not found", model_id)))?;
+
+                let count = conn.execute(
+                    "DELETE FROM __indexes WHERE id = ?1",
+                    params![id],
+                ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+                // Drop index from physical table
+                drop(conn);
+                self.drop_physical_index(&model_name, &name)?;
+
                 Ok(count as u64)
             },
             _ => Err(StateError::BadRequest(format!("cannot delete from internal table {}", resource_type))),
@@ -1929,7 +2138,89 @@ mod tests {
         let title_field = field_list.iter().find(|f| f["name"] == "title").expect("field not found");
         
         assert_eq!(title_field["id"], format!("{}-title", model_id));
-        assert_eq!(title_field["owner_id"], "creator_1");
+        assert_eq!(title_field["owner_id"].as_str().unwrap(), "creator_1");
+
+        // 4. Verify it's also in the model detail read
+        let model_detail = state.read(&create_target("__models", Some(&model_id)), &FieldSet::all(), None).unwrap();
+        assert_eq!(model_detail["owner_id"].as_str().unwrap(), "creator_1");
+        
+        let fields_in_detail = model_detail["fields"].as_array().unwrap();
+        let title_in_detail = fields_in_detail.iter().find(|f| f["name"] == "title").unwrap();
+        assert_eq!(title_in_detail["owner_id"].as_str().unwrap(), "creator_1");
+    }
+
+    #[test]
+    fn test_schema_indexing_flow() {
+        let mut state = create_state();
+        let migration_manager = crate::migration::manager::MigrationManager::new();
+        migration_manager.run(&mut state).unwrap();
+        
+        // 1. Create model
+        state.write(
+            &create_target("__models", None),
+            &FieldSet::all(),
+            &json!({ "name": "users", "namespace": "public" }),
+            None
+        ).unwrap();
+
+        let models = state.read(&create_target("__models", None), &FieldSet::all(), Some(&json!({ "name": "users" }))).unwrap();
+        let model_id = models[0]["id"].as_str().unwrap().to_string();
+
+        // 2. Add field
+        state.write(
+            &create_target("__fields", None),
+            &FieldSet::all(),
+            &json!({
+                "model_id": model_id,
+                "name": "email",
+                "field_type": { "type": "String" },
+                "required": true
+            }),
+            None
+        ).unwrap();
+
+        // 3. Create index
+        state.write(
+            &create_target("__indexes", None),
+            &FieldSet::all(),
+            &json!({
+                "model_id": model_id,
+                "name": "unique_email",
+                "fields": [format!("{}-email", model_id)],
+                "unique": true
+            }),
+            None
+        ).unwrap();
+
+        // 4. Verify index metadata
+        let indexes = state.read(&create_target("__indexes", None), &FieldSet::all(), Some(&json!({ "model_id": model_id }))).unwrap();
+        let idx_list = indexes.as_array().unwrap();
+        assert_eq!(idx_list.len(), 1);
+        assert_eq!(idx_list[0]["name"], "unique_email");
+        assert!(idx_list[0]["unique"].as_bool().unwrap());
+
+        // 5. Verify physical index exists
+        state.with_connection(|conn| {
+            let exists: bool = conn.query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name LIKE ?1",
+                params!["%unique_email%"],
+                |_| Ok(true)
+            ).unwrap_or(false);
+            assert!(exists, "Physical index should exist");
+        });
+
+        // 6. Delete index
+        let idx_id = idx_list[0]["id"].as_str().unwrap();
+        state.delete(&create_target("__indexes", Some(idx_id)), None).unwrap();
+
+        // 7. Verify physical index dropped
+        state.with_connection(|conn| {
+            let exists: bool = conn.query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name LIKE ?1",
+                params!["%unique_email%"],
+                |_| Ok(true)
+            ).unwrap_or(false);
+            assert!(!exists, "Physical index should be dropped");
+        });
     }
 }
-
