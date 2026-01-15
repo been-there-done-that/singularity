@@ -217,4 +217,40 @@ async fn test_pap_insert_and_query() {
     let count_exec = execute_cap(&app, grant["token"].as_str().unwrap(), count_input).await.unwrap();
     
     assert_eq!(count_exec["count"], 2);
+
+    // 5. Data Update (PAP)
+    let id_to_update = data[0]["id"].as_str().unwrap();
+    let update_input = json!({
+        "where": { "eq": ["id", id_to_update] },
+        "set": { "title": "Buy oat milk" },
+        "returning": ["id", "title", "updated_at"]
+    });
+    
+    let update_resp = make_request(&app, &admin_jwt, "data.update", Resource::collection("todo"), Some(update_input.clone())).await;
+    if let Err(e) = &update_resp { println!("Update Request Failed: {:?}", e); }
+    assert!(update_resp.is_ok());
+    let grant = update_resp.unwrap();
+    let update_exec = execute_cap(&app, grant["token"].as_str().unwrap(), update_input).await.unwrap();
+    assert_eq!(update_exec[0]["title"], "Buy oat milk");
+    assert!(update_exec[0].get("updated_at").is_some());
+
+    // 6. Data Delete (PAP)
+    let id_to_delete = data[1]["id"].as_str().unwrap();
+    let delete_input = json!({
+        "where": { "eq": ["id", id_to_delete] },
+        "returning": ["id"]
+    });
+    let delete_resp = make_request(&app, &admin_jwt, "data.delete", Resource::collection("todo"), Some(delete_input.clone())).await;
+    assert!(delete_resp.is_ok());
+    let grant = delete_resp.unwrap();
+    let delete_exec = execute_cap(&app, grant["token"].as_str().unwrap(), delete_input).await.unwrap();
+    assert_eq!(delete_exec[0]["id"], id_to_delete);
+
+    // 7. Verify Final Count (Should be 1)
+    let count_input = json!({ "select": [] });
+    let count_resp = make_request(&app, &admin_jwt, "data.count", Resource::collection("todo"), Some(count_input.clone())).await;
+    assert!(count_resp.is_ok());
+    let grant = count_resp.unwrap();
+    let count_exec = execute_cap(&app, grant["token"].as_str().unwrap(), count_input).await.unwrap();
+    assert_eq!(count_exec["count"], 1);
 }
