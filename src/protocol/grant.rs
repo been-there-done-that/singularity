@@ -34,7 +34,12 @@ pub struct CapabilityPayload {
     /// Internal User ID (for ownership attribution).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub internal_user_id: Option<String>,
+    /// Hash of (LogicalPlan, PlanGrant) for plan binding.
+    /// Executor asserts this matches to prevent mismatched plan/grant reuse.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_hash: Option<String>,
 }
+
 
 impl CapabilityPayload {
     /// Create a new capability payload.
@@ -64,12 +69,20 @@ impl CapabilityPayload {
             constraints: None,
             bind: None,
             internal_user_id: None,
+            plan_hash: None,
         }
     }
 
     /// Set internal user ID for ownership tracking.
     pub fn with_internal_user_id(mut self, internal_user_id: impl Into<String>) -> Self {
         self.internal_user_id = Some(internal_user_id.into());
+        self
+    }
+
+    /// Set plan hash for plan/grant binding.
+    /// Executor asserts this matches to prevent mismatched reuse.
+    pub fn with_plan_hash(mut self, hash: impl Into<String>) -> Self {
+        self.plan_hash = Some(hash.into());
         self
     }
 
