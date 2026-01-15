@@ -67,6 +67,49 @@ impl SqliteState {
         f(&conn)
     }
 
+    // ========================================================================
+    // Health Check Methods
+    // ========================================================================
+
+    /// Check if the database connection is alive.
+    /// 
+    /// This is used by the health endpoint to detect degraded states.
+    /// Never panics — returns Err on any DB issue.
+    pub fn ping(&self) -> Result<(), StateError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("SELECT 1")
+            .map_err(|e| StateError::ConnectionError(e.to_string()))
+    }
+
+    /// Check if any internal user exists (bootstrap complete).
+    /// 
+    /// Returns Ok(true) if at least one internal user exists.
+    /// Returns Ok(false) if the table is empty.
+    /// Returns Err if DB query fails.
+    pub fn has_any_internal_user(&self) -> Result<bool, StateError> {
+        let conn = self.conn.lock().unwrap();
+        
+        // First check if table exists
+        let table_exists: bool = conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='__internal_users'",
+            [],
+            |_| Ok(true)
+        ).unwrap_or(false);
+
+        if !table_exists {
+            return Ok(false);
+        }
+
+        // Check if any user exists
+        let has_user: bool = conn.query_row(
+            "SELECT 1 FROM __internal_users LIMIT 1",
+            [],
+            |_| Ok(true)
+        ).unwrap_or(false);
+
+        Ok(has_user)
+    }
+
     /// Initialize the state schema.
     fn initialize_schema(&self) -> Result<(), StateError> {
         let conn = self.conn.lock().unwrap();
@@ -1348,4 +1391,58 @@ mod tests {
         assert!(caps.cas_constraints);
         assert_eq!(caps.backend_name, "sqlite");
     }
+
+    // ========================================================================
+    // Health Check Tests
+    // ========================================================================
+
+    #[test]
+    fn test_ping_succeeds() {
+        let state = create_state();
+        assert!(state.ping().is_ok());
+    }
+
+    #[test]
+    fn test_has_any_internal_user_empty_db() {
+        let state = create_state();
+        // Fresh DB with no migrations run - table doesn't exist
+        let result = state.has_any_internal_user();
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // No users
+    }
+
+    #[test]
+    fn test_has_any_internal_user_after_bootstrap() {
+        let state = create_state();
+        
+        // Simulate migration creating the __internal_users table
+        state.with_connection(|conn| {
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS __internal_users (
+                    id TEXT PRIMARY KEY,
+                    external_subject TEXT NOT NULL,
+                    roles TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                )",
+                [],
+            ).unwrap();
+        });
+
+        // Still no users
+        assert!(!state.has_any_internal_user().unwrap());
+
+        // Add a user
+        state.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO __internal_users (id, external_subject, roles, status, created_at) 
+                 VALUES ('user-1', 'admin@test.com', '[]', 'active', 0)",
+                [],
+            ).unwrap();
+        });
+
+        // Now has user
+        assert!(state.has_any_internal_user().unwrap());
+    }
 }
+
