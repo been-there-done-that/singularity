@@ -77,3 +77,18 @@ export async function kernelFetch<T>(
 
     return response.json();
 }
+
+/**
+ * Check kernel health and readiness.
+ * Unauthenticated endpoint.
+ */
+export async function checkHealth(): Promise<HealthResponse> {
+    const url = `${KERNEL_BASE_URL}/healthz`;
+    const response = await fetch(url);
+    if (!response.ok) {
+        throw new Error(`Health check failed: ${response.status}`);
+    }
+    return response.json();
+}
+
+import type { HealthResponse } from './types';

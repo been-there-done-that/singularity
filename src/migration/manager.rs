@@ -23,36 +23,36 @@ impl MigrationManager {
     }
 
     pub fn run(&self, state: &mut dyn State) -> Result<(), TransportError> {
-        // Simple approach for V0: Always try to apply bootstrap if not exists.
-        // Bootstrap creates tables IF NOT EXISTS.
-        // But for future, we need version check.
-        // V0 creates `__schema_version`.
-        // So we run V0 first.
+        // 1. Get current Max Version (if table exists)
+        let current_version = state.get_schema_version()
+            .map_err(|e| TransportError::Internal(e.to_string()))?;
+
+        // If None, it means table missing -> Run everything (start from 0)
+        // If Some(v), run migrations with version > v
         
         let pending = &self.migrations;
         
         for migration in pending {
-            // In a real system:
-            // 1. Get current version (catch error if table missing)
-            // 2. If version < migration.version(), apply.
-            // For now, V0 is safe to run repeatedly (IF NOT EXISTS).
+            if let Some(max_ver) = current_version {
+                if migration.version() <= max_ver {
+                    continue; // Skip already applied
+                }
+            }
             
+            println!("Applying migration: {} (v{})", migration.name(), migration.version());
+
             // Just apply.
             migration.apply(state)?;
             
             // Record version (Upsert?)
             // We need a way to insert into __schema_version.
-            // State trait doesn't have "insert internal".
-            // Use execute_ddl for INSERT too? (Since it's execution).
-            // Yes.
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
             let sql = format!(
                 "INSERT OR REPLACE INTO __schema_version (version, applied_at) VALUES ({}, {});",
                 migration.version(), now
             );
-            state.execute_ddl(&sql)?;
+            state.execute_ddl(&sql).map_err(|e| TransportError::Internal(e.to_string()))?;
         }
-
         Ok(())
     }
 }

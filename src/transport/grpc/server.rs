@@ -32,6 +32,7 @@ impl From<TransportError> for Status {
     fn from(err: TransportError) -> Self {
         match err {
             TransportError::Unauthorized(e) => Status::unauthenticated(e.to_string()),
+            TransportError::SessionInvalid(e) => Status::unauthenticated(e.to_string()),
             TransportError::PolicyDenied => Status::permission_denied("policy denied"),
             TransportError::InvalidCapability(msg) => Status::permission_denied(format!("invalid capability: {}", msg)),
             TransportError::BadRequest(msg) => Status::invalid_argument(msg),

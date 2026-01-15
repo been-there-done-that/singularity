@@ -10,38 +10,7 @@
 	 * Rule: Never show raw backend errors - translate them.
 	 */
 
-	interface Toast {
-		id: string;
-		type: 'success' | 'error' | 'warning' | 'info';
-		message: string;
-		duration?: number;
-	}
-
-	let toasts = $state<Toast[]>([]);
-
-	function addToast(toast: Omit<Toast, 'id'>) {
-		const id = crypto.randomUUID();
-		toasts = [...toasts, { ...toast, id }];
-
-		const duration = toast.duration ?? 5000;
-		setTimeout(() => {
-			removeToast(id);
-		}, duration);
-	}
-
-	function removeToast(id: string) {
-		toasts = toasts.filter((t) => t.id !== id);
-	}
-
-	// Expose toast functions globally
-	export function toast(message: string, type: Toast['type'] = 'info', duration?: number) {
-		addToast({ message, type, duration });
-	}
-
-	export const success = (message: string) => toast(message, 'success');
-	export const error = (message: string) => toast(message, 'error');
-	export const warning = (message: string) => toast(message, 'warning');
-	export const info = (message: string) => toast(message, 'info');
+	import { toast } from '$lib/state/toast.svelte';
 
 	const typeStyles = {
 		success: 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400',
@@ -60,25 +29,25 @@
 
 <!-- Toast Container -->
 <div class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none">
-	{#each toasts as toast (toast.id)}
+	{#each toast.toasts as item (item.id)}
 		<div
 			class="pointer-events-auto min-w-72 max-w-md px-4 py-3 border rounded-lg shadow-lg backdrop-blur-sm flex items-start gap-3 animate-in slide-in-from-right-5 duration-300 {typeStyles[
-				toast.type
+				item.type
 			]}"
 			role="alert"
 		>
 			<svg
-				class="w-5 h-5 flex-shrink-0 mt-0.5"
+				class="shrink-0 w-5 h-5 mt-0.5"
 				fill="none"
 				stroke="currentColor"
 				viewBox="0 0 24 24"
 			>
-				{@html typeIcons[toast.type]}
+				{@html typeIcons[item.type]}
 			</svg>
-			<p class="text-sm flex-1">{toast.message}</p>
+			<p class="text-sm flex-1">{item.message}</p>
 			<button
-				onclick={() => removeToast(toast.id)}
-				class="flex-shrink-0 opacity-60 hover:opacity-100 transition-opacity"
+				onclick={() => toast.remove(item.id)}
+				class="shrink-0 opacity-60 hover:opacity-100 transition-opacity"
 				aria-label="Dismiss"
 			>
 				<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

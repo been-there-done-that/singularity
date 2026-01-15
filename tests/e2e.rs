@@ -242,6 +242,8 @@ fn e2e_full_pipeline_jwt_to_state() {
     
     let jwt_claims = StandardClaims {
         sub: "jwt-user-999".to_string(),
+        sid: Some("session-e2e".to_string()),
+        skh: Some("hash-e2e".to_string()),
         roles: vec!["editor".to_string()],
         groups: vec!["content-team".to_string()],
         email: Some("jwt-user@example.com".to_string()),
@@ -349,6 +351,8 @@ fn e2e_full_pipeline_jwt_to_state() {
     // User with "viewer" role cannot create
     let viewer_claims = StandardClaims {
         sub: "viewer-user".to_string(),
+        sid: None,
+        skh: None,
         roles: vec!["viewer".to_string()],
         groups: vec![],
         email: None,

@@ -1,158 +1,383 @@
-use std::sync::Arc;
+//! End-to-end tests for Access Control.
+//!
+//! Tests ownership-based access control with real sessions.
+
+use axum::{body::Body, http::{Request, StatusCode}};
 use serde_json::json;
-use singularity::transport::{AppState, pipeline};
-use singularity::protocol::{OpRequest, OpExecute, Resource, FieldSet};
-use singularity::policy::{PolicyEngine, PolicySubject};
-use singularity::identity::{IdentityVerifier};
+use std::sync::Arc;
+
+use singularity::capability::{CapabilitySigner, SigningKey};
+use singularity::identity::JwtVerifier;
+use singularity::policy::PolicyEngine;
+use singularity::protocol::{OpRequest, OpExecute, Resource};
 use singularity::state::SqliteState;
-use singularity::capability::{SigningKey, CapabilitySigner};
-use singularity::migration::manager::MigrationManager;
+use singularity::transport::AppState;
+use singularity::transport::http::app;
 
-// Mock Identity Verifier that trusts everything
-struct MockIdentity(String, Vec<String>); // ID, Roles
-impl IdentityVerifier for MockIdentity {
-    fn verify(&self, _token: &str, _now: u64) -> Result<PolicySubject, singularity::identity::IdentityError> {
-        Ok(PolicySubject {
-            id: self.0.clone(),
-            roles: self.1.clone(),
-            claims: Default::default(),
-            internal_id: None, // internal_id will be enriched by pipeline
-        })
-    }
-}
-
-fn create_shared_state() -> Arc<SqliteState> {
-    let mut state = SqliteState::in_memory().unwrap();
-    let migration_manager = MigrationManager::new();
-    migration_manager.run(&mut state).unwrap();
-    Arc::new(state)
-}
-
-fn create_app(state: Arc<SqliteState>, user_id: &str, roles: Vec<&str>) -> AppState {
-    let identity = Arc::new(MockIdentity(user_id.to_string(), roles.iter().map(|s| s.to_string()).collect()));
-    let sys_policy = std::fs::read_to_string("src/policy/defaults.rhai").unwrap();
-    let signing_key = SigningKey::generate();
-
-    AppState {
-        state,
-        identity,
-        policy: Arc::new(PolicyEngine::new()),
-        system_policy: sys_policy,
-        signer: Arc::new(CapabilitySigner::new(signing_key)),
-    }
-}
-
-#[test]
-fn test_provisioning_and_ownership() {
-    let state = create_shared_state();
-    let now = 1704067200;
-
-    let admin_app = create_app(state.clone(), "user-admin", vec!["admin"]);
-    let app = create_app(state.clone(), "user-alice", vec!["user"]);
-    let other_app = create_app(state.clone(), "user-bob", vec!["user"]);
-
-    // 1. Admin creates "todo" model
-    let create_model_req = OpRequest {
-        request_id: "req-0".into(),
-        op: "schema.create_model".into(),
-        resource: Resource::instance("__models", "todo"),
-        fields: None,
-        input: Some(json!({"name": "todo"})),
-        timestamp: now,
+/// Helper to register a user and get their JWT
+async fn register_user(
+    app: &axum::Router,
+    username: &str,
+    password: &str,
+    bootstrap_code: Option<&str>,
+) -> (String, String) {
+    let register_body = match bootstrap_code {
+        Some(code) => json!({
+            "username": username,
+            "password": password,
+            "bootstrap_code": code
+        }),
+        None => json!({
+            "username": username,
+            "password": password
+        }),
     };
+
+    let register_req = Request::builder()
+        .uri("/auth/register")
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_string(&register_body).unwrap()))
+        .unwrap();
+
+    let resp = tower::util::ServiceExt::oneshot(app.clone(), register_req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "register should succeed for {}", username);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 2048).await.unwrap();
+    let auth: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     
-    let grant = pipeline::process_request(&admin_app, "mock-token", create_model_req, now).expect("Admin should be allowed");
-    let exec = OpExecute {
-        execute_id: "exec-0".into(),
-        token: grant.token,
-        payload: Some(json!({"name": "todo"})),
-        timestamp: now,
-    };
-    pipeline::process_execute(&admin_app, exec, now).expect("Execution failed");
+    (
+        auth["token"].as_str().unwrap().to_string(),
+        auth["session_id"].as_str().unwrap().to_string(),
+    )
+}
 
-    // 1b. Admin adds "title" field
-    let add_field_req = OpRequest {
-        request_id: "req-0b".into(),
-        op: "schema.add_field".into(),
-        resource: Resource::instance("__fields", "field-title"),
-        fields: None,
-        input: Some(json!({
-            "model_id": "todo",
-            "name": "title",
-            "field_type": { "type": "String" }, // Assuming type structure
-            "required": true
-        })),
-        timestamp: now,
-    };
-    let grant = pipeline::process_request(&admin_app, "mock-token", add_field_req, now).expect("Admin add field allowed");
-    let exec = OpExecute {
-        execute_id: "exec-0b".into(),
-        token: grant.token,
-        payload: Some(json!({
+/// Helper to make an authenticated request
+async fn make_request(
+    app: &axum::Router,
+    jwt: &str,
+    op: &str,
+    resource: Resource,
+    input: Option<serde_json::Value>,
+) -> Result<serde_json::Value, StatusCode> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let op_req = OpRequest::new("req-test", op, resource, now)
+        .with_input(input.unwrap_or(serde_json::Value::Null));
+
+    let req = Request::builder()
+        .uri("/v1/op/request")
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", jwt))
+        .body(Body::from(serde_json::to_string(&op_req).unwrap()))
+        .unwrap();
+
+    let resp = tower::util::ServiceExt::oneshot(app.clone(), req).await.unwrap();
+    
+    if resp.status() != StatusCode::OK {
+        let status = resp.status();
+        // For debugging 500s/403s in tests
+        let bytes = axum::body::to_bytes(resp.into_body(), 2048).await.unwrap();
+        // Request failed, but we return the status
+        return Err(status);
+    }
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 2048).await.unwrap();
+    Ok(serde_json::from_slice(&bytes).unwrap())
+}
+
+/// Helper to execute a capability
+async fn execute_cap(
+    app: &axum::Router,
+    token: &str,
+    payload: serde_json::Value,
+) -> Result<serde_json::Value, StatusCode> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let op_exec = OpExecute::new(
+        "exec-test",
+        singularity::protocol::CapabilityToken::new(token.to_string()),
+        now,
+    ).with_payload(payload);
+
+    let req = Request::builder()
+        .uri("/v1/op/execute")
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_string(&op_exec).unwrap()))
+        .unwrap();
+
+    let resp = tower::util::ServiceExt::oneshot(app.clone(), req).await.unwrap();
+    
+    if resp.status() != StatusCode::OK {
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 2048).await.unwrap();
+        // Execution failed, but we return the status
+        return Err(status);
+    }
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 2048).await.unwrap();
+    Ok(serde_json::from_slice(&bytes).unwrap())
+}
+
+fn create_app() -> (axum::Router, String) {
+    let jwt_secret = b"access-control-test-secret-32ch";
+    let identity = Arc::new(JwtVerifier::with_hmac_secret(
+        "https://singularity.local",
+        "singularity",
+        jwt_secret.to_vec(),
+    ));
+
+    let policy = PolicyEngine::new();
+    let sys_policy = std::fs::read_to_string("src/policy/defaults.rhai").unwrap();
+    let signer = CapabilitySigner::new(SigningKey::generate());
+    
+    let mut state = SqliteState::in_memory().unwrap();
+    let migration_manager = singularity::migration::manager::MigrationManager::new();
+    migration_manager.run(&mut state).expect("migrations failed");
+
+    let app_state = AppState::new(
+        identity,
+        policy,
+        signer,
+        state,
+        sys_policy,
+        jwt_secret.to_vec(),
+    );
+
+    let bootstrap_code = app_state.get_bootstrap_code_for_test().unwrap();
+
+    (app(app_state), bootstrap_code)
+}
+
+#[tokio::test]
+async fn test_provisioning_and_ownership() {
+    let (app, bootstrap_code) = create_app();
+
+    // 1. Register users: admin (with bootstrap code), alice, bob
+    let (admin_jwt, _) = register_user(&app, "admin", "adminpass123", Some(&bootstrap_code)).await;
+    let (alice_jwt, _) = register_user(&app, "alice", "alicepass123", None).await;
+    let (bob_jwt, _) = register_user(&app, "bob", "bobpass123", None).await;
+
+    // Promote Admin: Issue a token with "admin" role
+    use jsonwebtoken::{decode, encode, Validation, Algorithm, DecodingKey, EncodingKey, Header};
+    let decoding_key = DecodingKey::from_secret(b"access-control-test-secret-32ch");
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_audience(&["singularity"]);
+    
+    let token_data = decode::<singularity::identity::StandardClaims>(
+        &admin_jwt, 
+        &decoding_key, 
+        &validation
+    ).expect("should decode valid token");
+    
+    let mut admin_claims = token_data.claims;
+    admin_claims.roles = vec!["admin".to_string()];
+    
+    let encoding_key = EncodingKey::from_secret(b"access-control-test-secret-32ch");
+    let admin_jwt = encode(
+        &Header::new(Algorithm::HS256),
+        &admin_claims,
+        &encoding_key
+    ).expect("should encode admin token");
+
+    // 2. Admin creates "todo" model
+    let create_model = make_request(
+        &app,
+        &admin_jwt,
+        "schema.create_model",
+        Resource::instance("__models", "todo"),
+        Some(json!({"name": "todo"})),
+    ).await;
+    
+    assert!(create_model.is_ok(), "Admin should create model");
+    let grant = create_model.unwrap();
+    execute_cap(&app, grant["token"].as_str().unwrap(), json!({"name": "todo"})).await.unwrap();
+
+    // 3. Admin adds "title" field
+    let add_field = make_request(
+        &app,
+        &admin_jwt,
+        "schema.add_field",
+        Resource::instance("__fields", "field-title"),
+        Some(json!({
             "model_id": "todo",
             "name": "title",
             "field_type": { "type": "String" },
             "required": true
         })),
-        timestamp: now,
-    };
-    pipeline::process_execute(&admin_app, exec, now).expect("Add field failed");
+    ).await;
+    
+    assert!(add_field.is_ok(), "Admin should add field");
+    let grant = add_field.unwrap();
+    execute_cap(&app, grant["token"].as_str().unwrap(), json!({
+        "model_id": "todo",
+        "name": "title",
+        "field_type": { "type": "String" },
+        "required": true
+    })).await.unwrap();
 
-    // 2. User Creates Todo
-    let req = OpRequest {
-        request_id: "req-1".into(),
-        op: "resource.create".into(),
-        resource: Resource::instance("todo", "todo-1"), 
-        fields: Some(FieldSet::all()),
-        input: Some(json!({"title": "Buy milk"})),
-        timestamp: now,
-    };
-    let grant = pipeline::process_request(&app, "mock-token", req.clone(), now).expect("User should be allowed to create");
+    // 4. Alice creates a todo
+    let alice_create = make_request(
+        &app,
+        &alice_jwt,
+        "resource.create",
+        Resource::instance("todo", "todo-1"),
+        Some(json!({"title": "Buy milk"})),
+    ).await;
     
-    let exec = OpExecute {
-        execute_id: "exec-1".into(),
-        token: grant.token,
-        payload: Some(json!({"title": "Buy milk"})),
-        timestamp: now,
-    };
-    
-    pipeline::process_execute(&app, exec, now).expect("Create failed");
+    assert!(alice_create.is_ok(), "Alice should create todo");
+    let grant = alice_create.unwrap();
+    execute_cap(&app, grant["token"].as_str().unwrap(), json!({"title": "Buy milk"})).await.unwrap();
 
-    // 3. User Reads Todo (Should be allowed as owner)
-    let read_req = OpRequest {
-        request_id: "req-2".into(),
-        op: "resource.read".into(),
-        resource: Resource::instance("todo", "todo-1"),
-        fields: Some(FieldSet::all()),
-        input: None,
-        timestamp: now,
-    };
+    // 5. Alice reads her own todo (should work - owner)
+    let alice_read_grant = make_request(
+        &app,
+        &alice_jwt,
+        "resource.read",
+        Resource::instance("todo", "todo-1"),
+        None,
+    ).await.expect("Alice should get read grant");
     
-    let grant = pipeline::process_request(&app, "mock-token", read_req.clone(), now).expect("Owner should read");
-    let exec = OpExecute {
-        execute_id: "exec-2".into(),
-        token: grant.token,
-        payload: None,
-        timestamp: now,
-    };
-    let res = pipeline::process_execute(&app, exec, now).expect("Read failed");
-    if let singularity::execution::ExecutionResult::Read { data } = res {
-        assert_eq!(data["title"], "Buy milk");
-        assert!(data.get("owner_id").is_some());
-    } else {
-        panic!("Expected read result");
-    }
+    let alice_data = execute_cap(&app, alice_read_grant["token"].as_str().unwrap(), json!({})).await.expect("Alice should execute read");
+    assert_eq!(alice_data["title"], "Buy milk");
 
-    // 4. Other User Reads Todo (Should deny)
-    let deny_req = OpRequest {
-        request_id: "req-3".into(),
-        op: "resource.read".into(),
-        resource: Resource::instance("todo", "todo-1"), // Alice's todo
-        fields: Some(FieldSet::all()),
-        input: None,
-        timestamp: now,
-    };
+    // 6. Bob tries to read Alice's todo (should be DENIED - not owner)
+    let bob_read = make_request(
+        &app,
+        &bob_jwt,
+        "resource.read",
+        Resource::instance("todo", "todo-1"),
+        None,
+    ).await;
     
-    let err = pipeline::process_request(&other_app, "mock-token", deny_req, now);
-    assert!(err.is_err(), "Other user should be denied access to Alice's data");
+    assert!(bob_read.is_err(), "Bob should NOT be able to read Alice's todo");
+    assert_eq!(bob_read.unwrap_err(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_ownership_hardening() {
+    let (app, bootstrap_code) = create_app();
+    
+    // 0. Setup: Create schema (todo model) as Admin
+    let (admin_jwt, _) = register_user(&app, "admin", "adminpass123", Some(&bootstrap_code)).await;
+    
+    // Promote to Admin (Forge Token)
+    use jsonwebtoken::{decode, encode, Validation, Algorithm, DecodingKey, EncodingKey, Header};
+    let decoding_key = DecodingKey::from_secret(b"access-control-test-secret-32ch");
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_audience(&["singularity"]);
+    let token_data = decode::<singularity::identity::StandardClaims>(&admin_jwt, &decoding_key, &validation).unwrap();
+    let mut admin_claims = token_data.claims;
+    admin_claims.roles = vec!["admin".to_string()];
+    let encoding_key = EncodingKey::from_secret(b"access-control-test-secret-32ch");
+    let admin_jwt = encode(&Header::new(Algorithm::HS256), &admin_claims, &encoding_key).unwrap();
+
+    // Create Model "todo"
+    let create_model = make_request(
+        &app,
+        &admin_jwt,
+        "schema.create_model",
+        Resource::instance("__models", "todo"),
+        Some(json!({"name": "todo"})),
+    ).await;
+    assert!(create_model.is_ok(), "Admin should create model");
+    execute_cap(&app, create_model.unwrap()["token"].as_str().unwrap(), json!({"name": "todo"})).await.unwrap();
+
+    // Add "title" field
+    let add_title = make_request(
+        &app,
+        &admin_jwt,
+        "schema.add_field",
+        Resource::instance("__fields", "field-title"),
+        Some(json!({
+            "model_id": "todo",
+            "name": "title",
+            "field_type": { "type": "String" },
+            "required": true
+        })),
+    ).await;
+    assert!(add_title.is_ok(), "Admin should add title field");
+    execute_cap(&app, add_title.unwrap()["token"].as_str().unwrap(), json!({
+        "model_id": "todo",
+        "name": "title",
+        "field_type": { "type": "String" },
+        "required": true
+    })).await.unwrap();
+
+    // Users
+    let (alice_jwt, _) = register_user(&app, "alice", "alicepass123", None).await;
+
+    // 1. Source of Truth: Alice tries to spoof owner_id on CREATE
+    let spoof_val = "fake-owner-id";
+    let create_req = make_request(
+        &app,
+        &alice_jwt,
+        "resource.create",
+        Resource::instance("todo", "todo-spoof"),
+        Some(json!({
+            "title": "Spoof Attempt",
+            "owner_id": spoof_val 
+        })),
+    ).await;
+    
+    assert!(create_req.is_ok(), "Create should be allowed despite spoof attempt");
+    let grant = create_req.unwrap();
+    execute_cap(&app, grant["token"].as_str().unwrap(), json!({
+        "title": "Spoof Attempt",
+        "owner_id": spoof_val
+    })).await.expect("Execution should succeed");
+
+    // Verify Owner ID is Alice's internal ID, NOT spoof_val
+    let read_grant = make_request(
+        &app,
+        &alice_jwt,
+        "resource.read",
+        Resource::instance("todo", "todo-spoof"),
+        None,
+    ).await.unwrap();
+    
+    let alice_data = execute_cap(&app, read_grant["token"].as_str().unwrap(), json!({})).await.unwrap();
+    let actual_owner = alice_data["owner_id"].as_str().expect("owner_id should exist in record");
+    
+    assert_ne!(actual_owner, spoof_val, "Owner ID should NOT be spoofed input");
+    assert!(actual_owner.len() > 10, "Owner ID should be a valid internal ID (got {})", actual_owner);
+
+    // 2. Immutability: Alice tries to change owner_id on UPDATE
+    let update_req = make_request(
+        &app,
+        &alice_jwt,
+        "resource.update",
+        Resource::instance("todo", "todo-spoof"),
+        Some(json!({
+            "owner_id": "bob-target-id"
+        })),
+    ).await;
+    
+    assert!(update_req.is_ok(), "Alice should be allowed to call update");
+    let grant = update_req.unwrap();
+    execute_cap(&app, grant["token"].as_str().unwrap(), json!({
+        "owner_id": "bob-target-id"
+    })).await.unwrap();
+    
+    // Verify Owner ID is STILL Alice (unchanged)
+    let read_again_grant = make_request(
+        &app,
+        &alice_jwt,
+        "resource.read",
+        Resource::instance("todo", "todo-spoof"),
+        None,
+    ).await.unwrap();
+    
+    let read_data = execute_cap(&app, read_again_grant["token"].as_str().unwrap(), json!({})).await.unwrap();
+    let current_owner = read_data["owner_id"].as_str().unwrap();
+    assert_eq!(current_owner, actual_owner, "Owner ID should be immutable");
+    assert_ne!(current_owner, "bob-target-id");
 }

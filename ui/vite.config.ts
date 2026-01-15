@@ -3,4 +3,12 @@ import tailwindcss from '@tailwindcss/vite';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
 
-export default defineConfig({ plugins: [tailwindcss(), sveltekit(), devtoolsJson()] });
+export default defineConfig({
+    plugins: [tailwindcss(), sveltekit(), devtoolsJson()],
+    server: {
+        proxy: {
+            '/auth': 'http://localhost:3000',
+            '/v1': 'http://localhost:3000'
+        }
+    }
+});

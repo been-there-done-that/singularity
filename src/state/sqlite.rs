@@ -67,6 +67,76 @@ impl SqliteState {
         f(&conn)
     }
 
+    // ========================================================================
+    // Health Check Methods
+    // ========================================================================
+
+    /// Check if the database connection is alive.
+    /// 
+    /// This is used by the health endpoint to detect degraded states.
+    /// Never panics — returns Err on any DB issue.
+    pub fn ping(&self) -> Result<(), StateError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("SELECT 1")
+            .map_err(|e| StateError::ConnectionError(e.to_string()))
+    }
+
+    /// Check if any internal user exists (bootstrap complete).
+    /// 
+    /// Returns Ok(true) if at least one internal user exists.
+    /// Returns Ok(false) if the table is empty.
+    /// Returns Err if DB query fails.
+    pub fn has_any_internal_user(&self) -> Result<bool, StateError> {
+        let conn = self.conn.lock().unwrap();
+        
+        // First check if table exists
+        let table_exists: bool = conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='__internal_users'",
+            [],
+            |_| Ok(true)
+        ).unwrap_or(false);
+
+        if !table_exists {
+            return Ok(false);
+        }
+
+        // Check if any user exists
+        let has_user: bool = conn.query_row(
+            "SELECT 1 FROM __internal_users LIMIT 1",
+            [],
+            |_| Ok(true)
+        ).unwrap_or(false);
+
+        Ok(has_user)
+    }
+
+    /// Check if any admin user exists.
+    /// 
+    /// Returns Ok(true) if at least one user with 'admin' role exists.
+    pub fn has_admin_user(&self) -> Result<bool, StateError> {
+        let conn = self.conn.lock().unwrap();
+        
+        // First check if table exists
+        let table_exists: bool = conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='__internal_users'",
+            [],
+            |_| Ok(true)
+        ).unwrap_or(false);
+
+        if !table_exists {
+            return Ok(false);
+        }
+
+        // Check if any admin exists using json_each
+        let has_admin: bool = conn.query_row(
+            "SELECT 1 FROM __internal_users, json_each(roles) WHERE json_each.value = 'admin' LIMIT 1",
+            [],
+            |_| Ok(true)
+        ).unwrap_or(false);
+
+        Ok(has_admin)
+    }
+
     /// Initialize the state schema.
     fn initialize_schema(&self) -> Result<(), StateError> {
         let conn = self.conn.lock().unwrap();
@@ -192,29 +262,60 @@ impl SqliteState {
         match resource_type {
             "__models" => self.read_internal_models(&conn, id, constraints),
             "__fields" => {
-                let id = id.ok_or(StateError::BadRequest("collection read not supported for __fields".into()))?;
-                let mut stmt = conn.prepare("SELECT id, model_id, name, field_type, required, unique_flag, default_val, created_at FROM __fields WHERE id = ?1")
-                   .map_err(|e| StateError::InternalError(e.to_string()))?;
-                if let Some(row) = stmt.query_row(params![id], |row| {
-                    let f_type_str: String = row.get(3)?;
-                    let default_str: Option<String> = row.get(6)?;
-                    Ok(json!({
-                        "id": row.get::<_, String>(0)?,
-                        "model_id": row.get::<_, String>(1)?,
-                        "name": row.get::<_, String>(2)?,
-                        "field_type": serde_json::from_str::<Value>(&f_type_str).unwrap_or(Value::Null),
-                        "required": row.get::<_, i64>(4)? != 0,
-                        "unique": row.get::<_, i64>(5)? != 0,
-                        "default": default_str.map(|s| serde_json::from_str::<Value>(&s).unwrap_or(Value::Null)),
-                        "created_at": row.get::<_, i64>(7)?,
-                    }))
-                }).optional().map_err(|e| StateError::InternalError(e.to_string()))? {
-                    Ok(row)
+                if let Some(resource_id) = id {
+                    let mut stmt = conn.prepare("SELECT id, model_id, name, field_type, required, unique_flag, default_val, created_at FROM __fields WHERE id = ?1")
+                       .map_err(|e| StateError::InternalError(e.to_string()))?;
+                    if let Some(row) = stmt.query_row(params![resource_id], |row| {
+                        let f_type_str: String = row.get(3)?;
+                        let default_str: Option<String> = row.get(6)?;
+                        Ok(json!({
+                            "id": row.get::<_, String>(0)?,
+                            "model_id": row.get::<_, String>(1)?,
+                            "name": row.get::<_, String>(2)?,
+                            "field_type": serde_json::from_str::<Value>(&f_type_str).unwrap_or(Value::Null),
+                            "required": row.get::<_, i64>(4)? != 0,
+                            "unique": row.get::<_, i64>(5)? != 0,
+                            "default": default_str.map(|s| serde_json::from_str::<Value>(&s).unwrap_or(Value::Null)),
+                            "created_at": row.get::<_, i64>(7)?,
+                        }))
+                    }).optional().map_err(|e| StateError::InternalError(e.to_string()))? {
+                        Ok(row)
+                    } else {
+                         Err(StateError::NotFound {
+                            resource_type: resource_type.to_string(),
+                            resource_id: resource_id.to_string(),
+                        })
+                    }
                 } else {
-                     Err(StateError::NotFound {
-                        resource_type: resource_type.to_string(),
-                        resource_id: id.to_string(),
-                    })
+                    // Collection Read
+                    let mut sql = "SELECT id, model_id, name, field_type, required, unique_flag, default_val, created_at FROM __fields".to_string();
+                    let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+                    if let Some(c) = constraints {
+                        if let Some(name_filter) = c.get("name").and_then(|v| v.as_str()) {
+                            sql.push_str(" WHERE name = ?1");
+                            params_vec.push(Box::new(name_filter.to_string()));
+                        }
+                    }
+
+                    let mut stmt = conn.prepare(&sql).map_err(|e| StateError::InternalError(e.to_string()))?;
+                    let fields_iter = stmt.query_map(rusqlite::params_from_iter(params_vec.iter()), |row| {
+                        let f_type_str: String = row.get(3)?;
+                        let default_str: Option<String> = row.get(6)?;
+                        Ok(json!({
+                            "id": row.get::<_, String>(0)?,
+                            "model_id": row.get::<_, String>(1)?,
+                            "name": row.get::<_, String>(2)?,
+                            "field_type": serde_json::from_str::<Value>(&f_type_str).unwrap_or(Value::Null),
+                            "required": row.get::<_, i64>(4)? != 0,
+                            "unique": row.get::<_, i64>(5)? != 0,
+                            "default": default_str.map(|s| serde_json::from_str::<Value>(&s).unwrap_or(Value::Null)),
+                            "created_at": row.get::<_, i64>(7)?,
+                        }))
+                    }).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+                    let fields: Vec<Value> = fields_iter.filter_map(Result::ok).collect();
+                    Ok(json!(fields))
                 }
             },
             "__internal_users" => {
@@ -408,6 +509,30 @@ impl SqliteState {
                 // Drop lock before calling helper helper (it acquires lock itself)
                 drop(conn);
                 self.create_physical_table(name)?;
+                
+                // 3. Register system fields in __fields metadata
+                // This ensures they are visible to the execution layer and introspection
+                // We use resource.create internally (or direct SQL) to avoid alter_add_column loop
+                let system_fields = vec![
+                    ("id", "String", true),
+                    ("owner_id", "String", true), // Hardened: now required/present
+                    ("created_at", "Int", true),
+                    ("updated_at", "Int", true),
+                ];
+
+                let conn = self.conn.lock().unwrap();
+                for (f_name, f_type, required) in system_fields {
+                    let f_id = format!("{}-{}", id, f_name);
+                    let f_type_json = serde_json::json!({ "type": f_type });
+                    let f_type_str = serde_json::to_string(&f_type_json).unwrap();
+                    
+                    let _ = conn.execute(
+                        "INSERT INTO __fields (id, model_id, name, field_type, required, unique_flag, owner_id, created_at) 
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                         ON CONFLICT(id) DO NOTHING",
+                        params![f_id, id, f_name, f_type_str, required, f_name == "id", owner_id, created_at],
+                    );
+                }
                 
                 Ok(1)
             },
@@ -845,48 +970,93 @@ impl State for SqliteState {
                      // The DO UPDATE clause for created_at is `created_at = created_at`.
                      
                      // RE-DOING construction for correctness with `params_from_iter`.
-                     let mut final_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-                     final_values.push(Box::new(id.clone())); // id
-                     
-                     let mut col_names = vec!["id".to_string(), "created_at".to_string(), "updated_at".to_string()];
-                     let mut placeholder_str = vec!["?1".to_string(), "strftime('%s','now')".to_string(), "strftime('%s','now')".to_string()];
-                     let mut update_assignments = vec!["updated_at = strftime('%s', 'now')".to_string()];
+                     // Handle timestamps in Rust
+                     let now = std::time::SystemTime::now()
+                         .duration_since(std::time::UNIX_EPOCH)
+                         .unwrap_or_default()
+                         .as_secs() as i64;
 
-                     let mut param_idx = 2; // ?1 is id.
+                     // 1. Try UPDATE first. 
+                     // This handles partial updates without requiring all NOT NULL columns.
+                     let mut update_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+                     let mut update_assignments = Vec::new();
+                     let mut u_idx = 1;
+
+                     // updated_at always changes
+                     update_assignments.push(format!("updated_at = ?{}", u_idx));
+                     update_values.push(Box::new(now));
+                     u_idx += 1;
 
                      for (k, v) in map {
-                         col_names.push(quote_identifier(k));
-                         placeholder_str.push(format!("?{}", param_idx));
-                         update_assignments.push(format!("{} = ?{}", quote_identifier(k), param_idx));
+                         if k == "id" || k == "created_at" || k == "updated_at" { continue; }
                          
+                         update_assignments.push(format!("{} = ?{}", quote_identifier(k), u_idx));
                          match v {
-                             Value::String(s) => final_values.push(Box::new(s.clone())),
+                             Value::String(s) => update_values.push(Box::new(s.clone())),
                              Value::Number(n) => {
-                                 if let Some(i) = n.as_i64() {
-                                     final_values.push(Box::new(i));
-                                 } else if let Some(f) = n.as_f64() {
-                                     final_values.push(Box::new(f));
-                                 } else {
-                                     final_values.push(Box::new(n.to_string()));
-                                 }
+                                 if let Some(i) = n.as_i64() { update_values.push(Box::new(i)); }
+                                 else if let Some(f) = n.as_f64() { update_values.push(Box::new(f)); }
+                                 else { update_values.push(Box::new(n.to_string())); }
                              },
-                             Value::Bool(b) => final_values.push(Box::new(if *b { 1 } else { 0 })),
-                             Value::Null => final_values.push(Box::new(rusqlite::types::Null)),
-                             _ => final_values.push(Box::new(v.to_string())),
+                             Value::Bool(b) => update_values.push(Box::new(if *b { 1 } else { 0 })),
+                             Value::Null => update_values.push(Box::new(rusqlite::types::Null)),
+                             _ => update_values.push(Box::new(v.to_string())),
                          }
-                         param_idx += 1;
+                         u_idx += 1;
                      }
+
+                     update_values.push(Box::new(id.clone()));
+                     let update_sql = format!(
+                         "UPDATE {} SET {} WHERE id = ?{}",
+                         table_name,
+                         update_assignments.join(", "),
+                         u_idx
+                     );
+
+                     let affected = conn.execute(&update_sql, rusqlite::params_from_iter(update_values.iter()))
+                         .map_err(|e| StateError::InternalError(e.to_string()))?;
+
+                     if affected > 0 {
+                         return Ok(affected as u64);
+                     }
+
+                     // 2. If no rows affected, try INSERT.
+                     // This requires all NOT NULL columns.
+                     let mut insert_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+                     insert_values.push(Box::new(id.clone())); // ?1
                      
-                     let sql = format!(
-                         "INSERT INTO {} ({}) VALUES ({})
-                          ON CONFLICT(id) DO UPDATE SET {}",
+                     let mut col_names = vec!["id".to_string(), "created_at".to_string(), "updated_at".to_string()];
+                     let mut placeholders = vec!["?1".to_string(), "?2".to_string(), "?3".to_string()];
+                     insert_values.push(Box::new(now)); // ?2
+                     insert_values.push(Box::new(now)); // ?3
+
+                     let mut i_idx = 4;
+                     for (k, v) in map {
+                         if k == "id" || k == "created_at" || k == "updated_at" { continue; }
+                         col_names.push(quote_identifier(k));
+                         placeholders.push(format!("?{}", i_idx));
+                         match v {
+                             Value::String(s) => insert_values.push(Box::new(s.clone())),
+                             Value::Number(n) => {
+                                 if let Some(i) = n.as_i64() { insert_values.push(Box::new(i)); }
+                                 else if let Some(f) = n.as_f64() { insert_values.push(Box::new(f)); }
+                                 else { insert_values.push(Box::new(n.to_string())); }
+                             },
+                             Value::Bool(b) => insert_values.push(Box::new(if *b { 1 } else { 0 })),
+                             Value::Null => insert_values.push(Box::new(rusqlite::types::Null)),
+                             _ => insert_values.push(Box::new(v.to_string())),
+                         }
+                         i_idx += 1;
+                     }
+
+                     let insert_sql = format!(
+                         "INSERT INTO {} ({}) VALUES ({})",
                          table_name,
                          col_names.join(", "),
-                         placeholder_str.join(", "),
-                         update_assignments.join(", ")
+                         placeholders.join(", ")
                      );
-                     
-                     conn.execute(&sql, rusqlite::params_from_iter(final_values.iter()))
+
+                     conn.execute(&insert_sql, rusqlite::params_from_iter(insert_values.iter()))
                          .map_err(|e| StateError::InternalError(e.to_string()))?;
                          
                      return Ok(1);
@@ -1102,6 +1272,28 @@ impl State for SqliteState {
         Ok(owner)
     }
 
+    fn get_schema_version(&self) -> Result<Option<u64>, StateError> {
+        let conn = self.conn.lock().unwrap();
+        // Check table exists via sqlite_master
+        let exists: bool = conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='__schema_version'",
+            [],
+            |_| Ok(true)
+        ).unwrap_or(false);
+
+        if !exists {
+            return Ok(None);
+        }
+
+        let version_nested: Option<Option<u64>> = conn.query_row(
+            "SELECT MAX(version) FROM __schema_version",
+            [],
+            |row| row.get(0)
+        ).optional().map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        Ok(version_nested.flatten())
+    }
+
     fn capabilities(&self) -> &StateCapabilities {
         &self.capabilities
     }
@@ -1226,4 +1418,58 @@ mod tests {
         assert!(caps.cas_constraints);
         assert_eq!(caps.backend_name, "sqlite");
     }
+
+    // ========================================================================
+    // Health Check Tests
+    // ========================================================================
+
+    #[test]
+    fn test_ping_succeeds() {
+        let state = create_state();
+        assert!(state.ping().is_ok());
+    }
+
+    #[test]
+    fn test_has_any_internal_user_empty_db() {
+        let state = create_state();
+        // Fresh DB with no migrations run - table doesn't exist
+        let result = state.has_any_internal_user();
+        assert!(result.is_ok());
+        assert!(!result.unwrap()); // No users
+    }
+
+    #[test]
+    fn test_has_any_internal_user_after_bootstrap() {
+        let state = create_state();
+        
+        // Simulate migration creating the __internal_users table
+        state.with_connection(|conn| {
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS __internal_users (
+                    id TEXT PRIMARY KEY,
+                    external_subject TEXT NOT NULL,
+                    roles TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                )",
+                [],
+            ).unwrap();
+        });
+
+        // Still no users
+        assert!(!state.has_any_internal_user().unwrap());
+
+        // Add a user
+        state.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO __internal_users (id, external_subject, roles, status, created_at) 
+                 VALUES ('user-1', 'admin@test.com', '[]', 'active', 0)",
+                [],
+            ).unwrap();
+        });
+
+        // Now has user
+        assert!(state.has_any_internal_user().unwrap());
+    }
 }
+

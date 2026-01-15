@@ -62,6 +62,32 @@ class AuthState {
     get isAuthenticated(): boolean {
         return this.jwt !== null && this.subject !== null;
     }
+
+    /**
+     * Logout logic:
+     * 1. Attempt server-side revocation
+     * 2. Always clear local state
+     */
+    async logout(): Promise<void> {
+        if (!this.jwt) {
+            clearAuth();
+            return;
+        }
+
+        try {
+            await fetch('/auth/logout', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.jwt}`
+                }
+            });
+        } catch (e) {
+            console.warn('Backend logout failed, clearing local state anyway', e);
+        } finally {
+            clearAuth();
+            window.location.href = '/login';
+        }
+    }
 }
 
 // Export the singleton auth state
