@@ -129,11 +129,19 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
             }
 
             SCHEMA_LIST_MODELS => {
+                // Override target to read from __models system table
+                let params = crate::protocol::Resource::collection("__models");
+                let list_target = ExecutionTarget::new(params);
+
                 // 1. Prepare constraints (Owner Filtering)
                 let mut exec_constraints = serde_json::Map::new();
                 if let Some(user_id) = ctx.internal_user_id() {
-                     exec_constraints.insert("owner_id".to_string(), serde_json::json!(user_id));
+                     // Only enforce owner filtering for non-admins
+                     if !ctx.has_role("admin") {
+                        exec_constraints.insert("owner_id".to_string(), serde_json::json!(user_id));
+                     }
                 }
+
                 if let Some(p) = payload {
                     if let Some(obj) = p.as_object() {
                         for (k, v) in obj {
@@ -149,14 +157,15 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
 
                 // 2. Fetch Models
                 let models = self.state.read(
-                    target,
+                    &list_target,
                     ctx.fields(),
                     c_val.as_ref(),
                 )?;
 
                 // 3. Fetch Ownership Metadata (Enrichment)
                 // Query __fields for any field named 'owner_id'
-                let fields_target = ExecutionTarget::new(crate::protocol::Resource::collection("__fields"));
+                let fields_params = crate::protocol::Resource::collection("__fields");
+                let fields_target = ExecutionTarget::new(fields_params);
                 let ownership_constraints = serde_json::json!({ "name": "owner_id" });
                 
                 let fields = self.state.read(
@@ -196,6 +205,65 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                 let filtered = ctx.filter_output(enriched);
                 Ok(ExecutionResult::read(filtered))
             }
+
+            SCHEMA_DESCRIBE => {
+                let model_name = &target.resource.resource_type;
+                
+                // 1. Resolve Model Name -> ID
+                let params_models = crate::protocol::Resource::collection("__models");
+                let models_target = ExecutionTarget::new(params_models);
+                let mut lookup_constraints = serde_json::Map::new();
+                lookup_constraints.insert("name".to_string(), serde_json::json!(model_name));
+                
+                let models = self.state.read(
+                    &models_target,
+                    &crate::protocol::FieldSet::all(),
+                    Some(&serde_json::Value::Object(lookup_constraints))
+                )?;
+                
+                let model_id = if let serde_json::Value::Array(list) = models {
+                     list.first().and_then(|m| m.get("id")).and_then(|v| v.as_str()).map(|s| s.to_string())
+                } else {
+                     None
+                };
+                
+                let model_id = model_id.ok_or_else(|| ExecutionError::ResourceNotFound { 
+                    resource_type: "Model".into(), 
+                    resource_id: model_name.to_string() 
+                })?;
+
+                // 2. Describe (Query __fields)
+                // Override target to read from __fields system table
+                let params = crate::protocol::Resource::collection("__fields");
+                let describe_target = ExecutionTarget::new(params);
+                
+                let mut exec_constraints = serde_json::Map::new();
+                exec_constraints.insert("model_id".to_string(), serde_json::json!(model_id));
+                
+                if let Some(p) = payload {
+                    if let Some(obj) = p.as_object() {
+                        for (k, v) in obj {
+                            // Don't allow overriding model_id
+                            if k != "model_id" {
+                                exec_constraints.insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
+                }
+
+                let c_val = Some(serde_json::Value::Object(exec_constraints));
+
+                let fields = self.state.read(
+                    &describe_target,
+                    &crate::protocol::FieldSet::all(), // Always read all field metadata
+                    c_val.as_ref(),
+                )?;
+                
+                // Return as { fields: [...] } to match plan
+                Ok(ExecutionResult::read(serde_json::json!({ "fields": fields })))
+            }
+
+
 
             // CREATE operations
             RESOURCE_CREATE | USER_CREATE | DOCUMENT_CREATE | 
