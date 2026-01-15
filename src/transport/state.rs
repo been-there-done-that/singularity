@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::capability::CapabilitySigner;
 use crate::identity::IdentityVerifier;
+use crate::identity::provider::{IdentityService, JwtIssuer};
 use crate::policy::PolicyEngine;
 use crate::state::SqliteState;
 
@@ -24,6 +25,8 @@ pub struct AppState {
     pub state: Arc<SqliteState>,
     /// System-wide policy script.
     pub system_policy: String,
+    /// Identity provider (for login/register).
+    identity_service: Arc<IdentityService>,
 }
 
 impl AppState {
@@ -34,13 +37,35 @@ impl AppState {
         signer: CapabilitySigner,
         state: SqliteState,
         system_policy: String,
+        jwt_secret: Vec<u8>,
     ) -> Self {
+        // Create JWT issuer with same config as verifier
+        let jwt_issuer = JwtIssuer::new(
+            jwt_secret,
+            "https://singularity.local",
+            "singularity",
+        );
+        
+        let identity_service = IdentityService::new(jwt_issuer);
+        
         Self {
             identity,
             policy: Arc::new(policy),
             signer: Arc::new(signer),
             state: Arc::new(state),
             system_policy,
+            identity_service: Arc::new(identity_service),
         }
     }
+
+    /// Get the identity service for auth operations.
+    pub fn identity_service(&self) -> &IdentityService {
+        &self.identity_service
+    }
+
+    /// Get the SQLite state for direct access.
+    pub fn sqlite_state(&self) -> &SqliteState {
+        &self.state
+    }
 }
+

@@ -55,6 +55,18 @@ impl SqliteState {
         Ok(state)
     }
 
+    /// Execute a function with access to the underlying connection.
+    /// 
+    /// This is used by the Identity Provider for auth-specific queries
+    /// that don't fit the standard State trait interface.
+    pub fn with_connection<T, F>(&self, f: F) -> T
+    where
+        F: FnOnce(&Connection) -> T,
+    {
+        let conn = self.conn.lock().unwrap();
+        f(&conn)
+    }
+
     /// Initialize the state schema.
     fn initialize_schema(&self) -> Result<(), StateError> {
         let conn = self.conn.lock().unwrap();

@@ -26,6 +26,7 @@ prost = "0.12"
 prost-types = "0.12"
 regex = "1.12.2"
 uuid = { version = "1.19.0", features = ["v4"] }
+argon2 = "0.5"
 walkdir = "2.5.0"
 
 [build-dependencies]

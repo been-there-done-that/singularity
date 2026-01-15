@@ -41,10 +41,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Internal migrations applied successfully.");
 
     // 4. Initialize Kernel Components
+    let jwt_secret_bytes = jwt_secret.into_bytes();
     let identity = Arc::new(JwtVerifier::with_hmac_secret(
         "https://singularity.local", // Issuer
         "singularity",               // Audience
-        jwt_secret.into_bytes(),
+        jwt_secret_bytes.clone(),
     ));
 
     let policy = PolicyEngine::new();
@@ -61,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     warn!("Using ephemeral signing key. Tokens will be invalid after restart.");
     let signer = CapabilitySigner::new(SigningKey::generate());
 
-    let app_state = AppState::new(identity, policy, signer, state, sys_policy);
+    let app_state = AppState::new(identity, policy, signer, state, sys_policy, jwt_secret_bytes);
 
     // 5. Start Transports
     let http_addr = SocketAddr::from(([0, 0, 0, 0], http_port));

@@ -22,8 +22,10 @@ mod claims;
 mod error;
 mod jwt;
 mod traits;
+pub mod provider; // Identity Provider (JWT issuance)
 
 pub use claims::{ClaimConfig, StandardClaims};
 pub use error::IdentityError;
 pub use jwt::{JwtKeySource, JwtVerifier};
 pub use traits::IdentityVerifier;
+
