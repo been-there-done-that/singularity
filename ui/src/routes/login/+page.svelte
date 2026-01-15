@@ -21,9 +21,9 @@
 
 		try {
 			const endpoint = isRegister ? '/auth/register' : '/auth/login';
-			const body = isRegister 
-				? { username, password, roles: ['admin'] }
-				: { username, password };
+		// Note: Register only sends username/password - roles always default to ["user"]
+		// Admin promotion is a separate privileged operation
+		const body = { username, password };
 
 			const response = await fetch(`http://localhost:3000${endpoint}`, {
 				method: 'POST',

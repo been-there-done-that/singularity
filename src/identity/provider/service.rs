@@ -2,14 +2,25 @@
 //!
 //! # Responsibilities
 //!
-//! - User registration
-//! - User login (password verification)
-//! - JWT issuance
+//! - Registers users (auth identity only)
+//! - Verifies credentials
+//! - Issues JWTs
 //!
 //! # Non-Responsibilities
 //!
 //! - Policy evaluation (handled by kernel)
-//! - Capability minting (handled by kernel)
+//! - Capability minting (handled by kernel)  
+//! - Internal user provisioning (handled by pipeline via ensure_internal_user)
+//!
+//! # CRITICAL INVARIANTS
+//!
+//! 1. Auth identity != Authorization identity
+//!    - JWT sub = "auth:<auth_user_id>" (external subject format)
+//!    - Pipeline creates internal_user_id via ensure_internal_user
+//!
+//! 2. IdentityService NEVER touches __internal_users
+//!    - Only writes to __auth_users, __auth_secrets
+//!    - Internal user provisioning is pipeline's job
 
 use super::jwt::JwtIssuer;
 use super::password::{hash_password, verify_password, PasswordError};
@@ -37,13 +48,14 @@ pub enum AuthError {
 }
 
 /// Request to register a new user.
+/// 
+/// NOTE: No roles field - users always start as ["user"].
+/// Admin promotion is a separate privileged operation.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct RegisterRequest {
     pub username: String,
     pub email: Option<String>,
     pub password: String,
-    #[serde(default)]
-    pub roles: Vec<String>,
 }
 
 /// Request to login.
@@ -57,6 +69,7 @@ pub struct LoginRequest {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AuthResponse {
     pub token: String,
+    /// This is the EXTERNAL subject (auth:<auth_user_id>), not internal_user_id
     pub user_id: String,
     pub expires_in: u64,
 }
@@ -64,6 +77,7 @@ pub struct AuthResponse {
 /// Identity Service - handles user authentication.
 /// 
 /// Works directly with SqliteState for auth-specific queries.
+/// ONLY touches __auth_users and __auth_secrets tables.
 pub struct IdentityService {
     jwt_issuer: JwtIssuer,
 }
@@ -74,7 +88,19 @@ impl IdentityService {
         Self { jwt_issuer }
     }
 
+    /// Build the external subject from an auth user ID.
+    /// 
+    /// This is the canonical format for JWT `sub` claims from password auth.
+    /// Format: "auth:<auth_user_id>"
+    fn external_subject(auth_user_id: &str) -> String {
+        format!("auth:{}", auth_user_id)
+    }
+
     /// Register a new user.
+    /// 
+    /// Creates auth identity ONLY. Does NOT provision internal user.
+    /// The pipeline will provision internal user via ensure_internal_user
+    /// when the JWT is first used for a request.
     pub fn register(&self, state: &SqliteState, req: RegisterRequest) -> Result<AuthResponse, AuthError> {
         // 1. Check if username exists
         let exists = state.with_connection(|conn| {
@@ -107,8 +133,8 @@ impl IdentityService {
         // 3. Hash password
         let password_hash = hash_password(&req.password)?;
 
-        // 4. Create user
-        let user_id = Uuid::new_v4().to_string();
+        // 4. Create auth user (ONLY auth tables, not __internal_users)
+        let auth_user_id = Uuid::new_v4().to_string();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -118,7 +144,7 @@ impl IdentityService {
         state.with_connection(|conn| {
             conn.execute(
                 "INSERT INTO __auth_users (id, username, email, email_verified, created_at) VALUES (?1, ?2, ?3, 0, ?4)",
-                params![&user_id, &req.username, &req.email, now]
+                params![&auth_user_id, &req.username, &req.email, now]
             )
         }).map_err(|e| AuthError::Storage(e.to_string()))?;
 
@@ -126,34 +152,30 @@ impl IdentityService {
         state.with_connection(|conn| {
             conn.execute(
                 "INSERT INTO __auth_secrets (user_id, password_hash, updated_at) VALUES (?1, ?2, ?3)",
-                params![&user_id, &password_hash, now]
+                params![&auth_user_id, &password_hash, now]
             )
         }).map_err(|e| AuthError::Storage(e.to_string()))?;
 
-        // 5. Store roles (using existing __internal_users table)
-        let roles = if req.roles.is_empty() { vec!["user".to_string()] } else { req.roles.clone() };
-        let roles_json = serde_json::to_string(&roles).unwrap_or_else(|_| "[]".to_string());
+        // 5. Build external subject and issue JWT
+        // NOTE: Roles are ALWAYS ["user"] for new registrations.
+        // Admin promotion is a separate privileged operation.
+        let external_sub = Self::external_subject(&auth_user_id);
+        let roles = vec!["user".to_string()];
         
-        state.with_connection(|conn| {
-            conn.execute(
-                "INSERT OR REPLACE INTO __internal_users (id, external_subject, roles, status, created_at) VALUES (?1, ?2, ?3, 'active', ?4)",
-                params![&user_id, &user_id, &roles_json, now]
-            )
-        }).map_err(|e| AuthError::Storage(e.to_string()))?;
-
-        // 6. Issue JWT
         let token = self.jwt_issuer
-            .issue(&user_id, roles, req.email)
+            .issue(&external_sub, roles, req.email)
             .map_err(|e| AuthError::Jwt(e.to_string()))?;
 
         Ok(AuthResponse {
             token,
-            user_id,
+            user_id: external_sub, // Return external subject, not raw auth_user_id
             expires_in: 30 * 60, // 30 minutes
         })
     }
 
     /// Login with username and password.
+    /// 
+    /// Returns JWT with external subject. Does NOT touch __internal_users.
     pub fn login(&self, state: &SqliteState, req: LoginRequest) -> Result<AuthResponse, AuthError> {
         // 1. Find user by username
         let user: Result<(String, Option<String>), AuthError> = state.with_connection(|conn| {
@@ -164,13 +186,13 @@ impl IdentityService {
             ).map_err(|_| AuthError::UserNotFound)
         });
 
-        let (user_id, email) = user?;
+        let (auth_user_id, email) = user?;
 
         // 2. Get password hash
         let stored_hash: Result<String, AuthError> = state.with_connection(|conn| {
             conn.query_row(
                 "SELECT password_hash FROM __auth_secrets WHERE user_id = ?1 LIMIT 1",
-                params![&user_id],
+                params![&auth_user_id],
                 |row| row.get(0)
             ).map_err(|_| AuthError::InvalidCredentials)
         });
@@ -182,25 +204,19 @@ impl IdentityService {
             return Err(AuthError::InvalidCredentials);
         }
 
-        // 4. Get roles from __internal_users
-        let roles_json: String = state.with_connection(|conn| {
-            conn.query_row(
-                "SELECT roles FROM __internal_users WHERE external_subject = ?1 LIMIT 1",
-                params![&user_id],
-                |row| row.get(0)
-            ).unwrap_or_else(|_| "[]".to_string())
-        });
+        // 4. Build external subject and issue JWT
+        // NOTE: Roles default to ["user"]. The pipeline's ensure_internal_user
+        // will provision/update internal user with actual roles if needed.
+        let external_sub = Self::external_subject(&auth_user_id);
+        let roles = vec!["user".to_string()];
 
-        let roles: Vec<String> = serde_json::from_str(&roles_json).unwrap_or_default();
-
-        // 5. Issue JWT
         let token = self.jwt_issuer
-            .issue(&user_id, roles, email)
+            .issue(&external_sub, roles, email)
             .map_err(|e| AuthError::Jwt(e.to_string()))?;
 
         Ok(AuthResponse {
             token,
-            user_id,
+            user_id: external_sub, // Return external subject, not raw auth_user_id
             expires_in: 30 * 60,
         })
     }
