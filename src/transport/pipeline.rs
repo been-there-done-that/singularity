@@ -233,14 +233,14 @@ pub fn process_execute(
 mod tests {
     use super::*;
     use crate::policy::{PolicySubject, PolicyResult, ScriptSource};
-    use crate::protocol::Resource;
+    use crate::protocol::{Resource, opcode::*};
 
     #[test]
     fn test_evaluate_policy_enforce_mode() {
         let engine = PolicyEngine::default();
         let subject = PolicySubject::new("user-1").with_internal_id("int-1");
         let resource = Resource::instance("doc", "doc-1");
-        let ctx = PolicyContext::new(subject, resource, "resource.read", PolicyEnv::new(0))
+        let ctx = PolicyContext::new(subject, resource, RESOURCE_READ, PolicyEnv::new(0))
             .with_resource_owner("int-1");
 
         // Owner should be allowed
@@ -260,7 +260,7 @@ mod tests {
         let engine = PolicyEngine::default();
         let subject = PolicySubject::new("user-1").with_internal_id("int-1");
         let resource = Resource::instance("doc", "doc-1");
-        let ctx = PolicyContext::new(subject, resource, "resource.read", PolicyEnv::new(0))
+        let ctx = PolicyContext::new(subject, resource, RESOURCE_READ, PolicyEnv::new(0))
             .with_resource_owner("int-1");
 
         // Owner should be allowed, with explanation
@@ -286,7 +286,7 @@ mod tests {
         let engine = PolicyEngine::default();
         let subject = PolicySubject::new("user-2").with_internal_id("other-user");
         let resource = Resource::instance("doc", "doc-1");
-        let ctx = PolicyContext::new(subject, resource, "resource.read", PolicyEnv::new(0))
+        let ctx = PolicyContext::new(subject, resource, RESOURCE_READ, PolicyEnv::new(0))
             .with_resource_owner("int-1"); // Different owner
 
         // Non-owner should be denied
