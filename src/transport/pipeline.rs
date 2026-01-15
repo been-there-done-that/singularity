@@ -6,11 +6,76 @@
 //! Both HTTP and gRPC handlers MUST call these functions.
 
 use crate::execution::{ExecutionContext, ExecutionMeta, ExecutionTarget, StateBackedExecutor, OperationExecutor, ExecutionResult};
-use crate::policy::{PolicyContext, PolicyEnv};
+use crate::policy::{AccessDecision, PolicyContext, PolicyEngine, PolicyEnv};
 use crate::protocol::{CapabilityPayload, FieldSet, OpExecute, OpRequest, CapGrant};
 use crate::transport::error::TransportError;
 use crate::transport::AppState;
 use crate::state::State;
+
+// ============================================================================
+// Internal Authorization Types (NOT EXPOSED)
+// ============================================================================
+
+/// Authorization evaluation mode (internal, not exposed).
+///
+/// The pipeline chooses the mode — callers cannot request it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AuthorizationMode {
+    /// Normal path: evaluates and returns bool only
+    #[default]
+    Enforce,
+    /// Debug path: evaluates and captures AccessDecision
+    Explain,
+}
+
+/// Authorization result with optional explanation.
+///
+/// This allows the pipeline to optionally capture why a decision was made,
+/// without changing the enforcement path.
+#[derive(Debug)]
+pub(crate) struct AuthorizationResult {
+    /// Whether the request was allowed
+    pub allowed: bool,
+    /// Optional explanation (only populated in Explain mode)
+    pub explanation: Option<AccessDecision>,
+}
+
+/// Evaluate policy with optional explanation (internal only).
+///
+/// This is the single integration point for explainability in the pipeline.
+/// - In `Enforce` mode: uses `evaluate()` for minimal overhead
+/// - In `Explain` mode: uses `evaluate_with_explanation()` and captures decision
+fn evaluate_policy(
+    engine: &PolicyEngine,
+    script: &str,
+    ctx: &PolicyContext,
+    mode: AuthorizationMode,
+) -> Result<AuthorizationResult, TransportError> {
+    match mode {
+        AuthorizationMode::Enforce => {
+            // Normal path: evaluate only, no explanation captured
+            let allowed = engine.evaluate(script, ctx)
+                .map_err(|_| TransportError::Internal("policy evaluation failed".into()))?;
+            Ok(AuthorizationResult {
+                allowed,
+                explanation: None,
+            })
+        }
+        AuthorizationMode::Explain => {
+            // Debug path: capture full decision
+            let decision = engine.evaluate_with_explanation(Some(script), ctx);
+            Ok(AuthorizationResult {
+                allowed: decision.allowed,
+                explanation: Some(decision),
+            })
+        }
+    }
+}
+
+// ============================================================================
+// Pipeline Functions
+// ============================================================================
+
 
 /// Core logic for `Request` operation.
 ///
@@ -65,10 +130,15 @@ pub fn process_request(
         }
     }
 
-    let allowed = app.policy.evaluate(&app.system_policy, &policy_ctx)
-        .map_err(|_| TransportError::Internal("policy evaluation failed".into()))?;
+    // 4. Policy Evaluation
+    let auth_result = evaluate_policy(
+        &app.policy,
+        &app.system_policy,
+        &policy_ctx,
+        AuthorizationMode::Enforce,
+    )?;
 
-    if !allowed {
+    if !auth_result.allowed {
         return Err(TransportError::PolicyDenied);
     }
 
@@ -139,3 +209,82 @@ pub fn process_execute(
 
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::{PolicySubject, PolicyResult, ScriptSource};
+    use crate::protocol::Resource;
+
+    #[test]
+    fn test_evaluate_policy_enforce_mode() {
+        let engine = PolicyEngine::default();
+        let subject = PolicySubject::new("user-1").with_internal_id("int-1");
+        let resource = Resource::instance("doc", "doc-1");
+        let ctx = PolicyContext::new(subject, resource, "resource.read", PolicyEnv::new(0))
+            .with_resource_owner("int-1");
+
+        // Owner should be allowed
+        let result = evaluate_policy(
+            &engine,
+            "owner",
+            &ctx,
+            AuthorizationMode::Enforce,
+        ).unwrap();
+
+        assert!(result.allowed);
+        assert!(result.explanation.is_none()); // No explanation in Enforce mode
+    }
+
+    #[test]
+    fn test_evaluate_policy_explain_mode() {
+        let engine = PolicyEngine::default();
+        let subject = PolicySubject::new("user-1").with_internal_id("int-1");
+        let resource = Resource::instance("doc", "doc-1");
+        let ctx = PolicyContext::new(subject, resource, "resource.read", PolicyEnv::new(0))
+            .with_resource_owner("int-1");
+
+        // Owner should be allowed, with explanation
+        let result = evaluate_policy(
+            &engine,
+            "owner",
+            &ctx,
+            AuthorizationMode::Explain,
+        ).unwrap();
+
+        assert!(result.allowed);
+        assert!(result.explanation.is_some());
+
+        let explanation = result.explanation.unwrap();
+        assert!(explanation.allowed);
+        assert!(explanation.ownership.is_owner);
+        assert!(matches!(explanation.policy.result, PolicyResult::Allow));
+        assert!(matches!(explanation.policy.script_source, ScriptSource::Inline(_)));
+    }
+
+    #[test]
+    fn test_evaluate_policy_deny_with_explanation() {
+        let engine = PolicyEngine::default();
+        let subject = PolicySubject::new("user-2").with_internal_id("other-user");
+        let resource = Resource::instance("doc", "doc-1");
+        let ctx = PolicyContext::new(subject, resource, "resource.read", PolicyEnv::new(0))
+            .with_resource_owner("int-1"); // Different owner
+
+        // Non-owner should be denied
+        let result = evaluate_policy(
+            &engine,
+            "owner",
+            &ctx,
+            AuthorizationMode::Explain,
+        ).unwrap();
+
+        assert!(!result.allowed);
+        assert!(result.explanation.is_some());
+
+        let explanation = result.explanation.unwrap();
+        assert!(!explanation.allowed);
+        assert!(!explanation.ownership.is_owner);
+        assert!(matches!(explanation.policy.result, PolicyResult::Deny));
+    }
+}
+
