@@ -19,8 +19,9 @@
             loading = true;
             // Phase 1: Request Capability
             const grant = await requestCapability({
-                op: 'schema.list',
+                op: 'schema.list_models',
                 resource: { resource_type: 'system', resource_id: null },
+
                 input: {}
             });
 
