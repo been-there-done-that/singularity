@@ -77,6 +77,7 @@ async fn test_grpc_transport_flow() {
         signer,
         state,
         sys_policy,
+        jwt_secret.to_vec(),
     );
 
     // 2. Start gRPC Server
@@ -109,6 +110,8 @@ async fn test_grpc_transport_flow() {
     
     let claims = StandardClaims {
         sub: "user-grpc".to_string(),
+        sid: Some("session-grpc".to_string()),
+        skh: Some("hash-grpc".to_string()),
         roles: vec!["admin".to_string()],
         groups: vec![],
         email: None,

@@ -4,7 +4,8 @@
 //!
 //! - Registers users (auth identity only)
 //! - Verifies credentials
-//! - Issues JWTs
+//! - Creates sessions (authority anchors)
+//! - Issues JWTs (capability tokens)
 //!
 //! # Non-Responsibilities
 //!
@@ -19,11 +20,16 @@
 //!    - Pipeline creates internal_user_id via ensure_internal_user
 //!
 //! 2. IdentityService NEVER touches __internal_users
-//!    - Only writes to __auth_users, __auth_secrets
-//!    - Internal user provisioning is pipeline's job
+//!    - Only writes to __auth_users, __auth_secrets, __auth_sessions
+//!
+//! 3. Session = Authority Anchor (long-lived)
+//!    - JWT is short-lived projection bound by `sid` and `skh`
+//!
+//! 4. Revocation always wins (regardless of JWT exp)
 
 use super::jwt::JwtIssuer;
 use super::password::{hash_password, verify_password, PasswordError};
+use super::session::{generate_session_key, hash_session_key};
 use crate::state::SqliteState;
 use thiserror::Error;
 use uuid::Uuid;
@@ -39,6 +45,10 @@ pub enum AuthError {
     UsernameExists,
     #[error("email already exists")]
     EmailExists,
+    #[error("session revoked")]
+    SessionRevoked,
+    #[error("session not found")]
+    SessionNotFound,
     #[error("password error: {0}")]
     Password(#[from] PasswordError),
     #[error("storage error: {0}")]
@@ -56,6 +66,9 @@ pub struct RegisterRequest {
     pub username: String,
     pub email: Option<String>,
     pub password: String,
+    /// Optional device name for session tracking
+    #[serde(default)]
+    pub device_name: Option<String>,
 }
 
 /// Request to login.
@@ -63,21 +76,25 @@ pub struct RegisterRequest {
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
+    /// Optional device name for session tracking
+    #[serde(default)]
+    pub device_name: Option<String>,
 }
 
 /// Response containing issued JWT.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AuthResponse {
     pub token: String,
-    /// This is the EXTERNAL subject (auth:<auth_user_id>), not internal_user_id
+    /// External subject (auth:<auth_user_id>)
     pub user_id: String,
+    /// Session ID (for device management UI)
+    pub session_id: String,
     pub expires_in: u64,
 }
 
 /// Identity Service - handles user authentication.
 /// 
-/// Works directly with SqliteState for auth-specific queries.
-/// ONLY touches __auth_users and __auth_secrets tables.
+/// ONLY touches __auth_users, __auth_secrets, __auth_sessions tables.
 pub struct IdentityService {
     jwt_issuer: JwtIssuer,
 }
@@ -89,18 +106,54 @@ impl IdentityService {
     }
 
     /// Build the external subject from an auth user ID.
-    /// 
-    /// This is the canonical format for JWT `sub` claims from password auth.
-    /// Format: "auth:<auth_user_id>"
     fn external_subject(auth_user_id: &str) -> String {
         format!("auth:{}", auth_user_id)
     }
 
+    /// Create a session and issue JWT atomically.
+    fn create_session_and_jwt(
+        &self,
+        state: &SqliteState,
+        auth_user_id: &str,
+        email: Option<String>,
+        device_name: Option<String>,
+    ) -> Result<AuthResponse, AuthError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        // Generate session key and hash
+        let session_id = Uuid::new_v4().to_string();
+        let session_key = generate_session_key();
+        let session_key_hash = hash_session_key(&session_key);
+
+        // Insert session
+        state.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO __auth_sessions (id, auth_user_id, session_key_hash, device_name, created_at, last_used_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![&session_id, auth_user_id, &session_key_hash, &device_name, now, now]
+            )
+        }).map_err(|e| AuthError::Storage(e.to_string()))?;
+
+        // Issue JWT with session binding
+        let external_sub = Self::external_subject(auth_user_id);
+        let roles = vec!["user".to_string()];
+
+        let token = self.jwt_issuer
+            .issue(&external_sub, &session_id, &session_key_hash, roles, email)
+            .map_err(|e| AuthError::Jwt(e.to_string()))?;
+
+        Ok(AuthResponse {
+            token,
+            user_id: external_sub,
+            session_id,
+            expires_in: 30 * 60,
+        })
+    }
+
     /// Register a new user.
-    /// 
-    /// Creates auth identity ONLY. Does NOT provision internal user.
-    /// The pipeline will provision internal user via ensure_internal_user
-    /// when the JWT is first used for a request.
     pub fn register(&self, state: &SqliteState, req: RegisterRequest) -> Result<AuthResponse, AuthError> {
         // 1. Check if username exists
         let exists = state.with_connection(|conn| {
@@ -133,7 +186,7 @@ impl IdentityService {
         // 3. Hash password
         let password_hash = hash_password(&req.password)?;
 
-        // 4. Create auth user (ONLY auth tables, not __internal_users)
+        // 4. Create auth user
         let auth_user_id = Uuid::new_v4().to_string();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -156,26 +209,11 @@ impl IdentityService {
             )
         }).map_err(|e| AuthError::Storage(e.to_string()))?;
 
-        // 5. Build external subject and issue JWT
-        // NOTE: Roles are ALWAYS ["user"] for new registrations.
-        // Admin promotion is a separate privileged operation.
-        let external_sub = Self::external_subject(&auth_user_id);
-        let roles = vec!["user".to_string()];
-        
-        let token = self.jwt_issuer
-            .issue(&external_sub, roles, req.email)
-            .map_err(|e| AuthError::Jwt(e.to_string()))?;
-
-        Ok(AuthResponse {
-            token,
-            user_id: external_sub, // Return external subject, not raw auth_user_id
-            expires_in: 30 * 60, // 30 minutes
-        })
+        // 5. Create session and issue JWT
+        self.create_session_and_jwt(state, &auth_user_id, req.email, req.device_name)
     }
 
     /// Login with username and password.
-    /// 
-    /// Returns JWT with external subject. Does NOT touch __internal_users.
     pub fn login(&self, state: &SqliteState, req: LoginRequest) -> Result<AuthResponse, AuthError> {
         // 1. Find user by username
         let user: Result<(String, Option<String>), AuthError> = state.with_connection(|conn| {
@@ -204,20 +242,45 @@ impl IdentityService {
             return Err(AuthError::InvalidCredentials);
         }
 
-        // 4. Build external subject and issue JWT
-        // NOTE: Roles default to ["user"]. The pipeline's ensure_internal_user
-        // will provision/update internal user with actual roles if needed.
-        let external_sub = Self::external_subject(&auth_user_id);
-        let roles = vec!["user".to_string()];
+        // 4. Create session and issue JWT
+        self.create_session_and_jwt(state, &auth_user_id, email, req.device_name)
+    }
 
-        let token = self.jwt_issuer
-            .issue(&external_sub, roles, email)
-            .map_err(|e| AuthError::Jwt(e.to_string()))?;
+    /// Revoke a session (logout).
+    pub fn logout(&self, state: &SqliteState, session_id: &str) -> Result<(), AuthError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
 
-        Ok(AuthResponse {
-            token,
-            user_id: external_sub, // Return external subject, not raw auth_user_id
-            expires_in: 30 * 60,
-        })
+        let rows = state.with_connection(|conn| {
+            conn.execute(
+                "UPDATE __auth_sessions SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL",
+                params![now, session_id]
+            )
+        }).map_err(|e| AuthError::Storage(e.to_string()))?;
+
+        if rows == 0 {
+            return Err(AuthError::SessionNotFound);
+        }
+
+        Ok(())
+    }
+
+    /// Revoke all sessions for a user (logout all devices).
+    pub fn logout_all(&self, state: &SqliteState, auth_user_id: &str) -> Result<u64, AuthError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let rows = state.with_connection(|conn| {
+            conn.execute(
+                "UPDATE __auth_sessions SET revoked_at = ?1 WHERE auth_user_id = ?2 AND revoked_at IS NULL",
+                params![now, auth_user_id]
+            )
+        }).map_err(|e| AuthError::Storage(e.to_string()))?;
+
+        Ok(rows as u64)
     }
 }

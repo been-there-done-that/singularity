@@ -4,6 +4,11 @@
 //!
 //! Uses HS256 (HMAC-SHA256) for simplicity in single-node deployment.
 //! Production should use EdDSA (Ed25519) with key rotation.
+//!
+//! # Session Binding
+//!
+//! JWTs include `sid` (session ID) and `skh` (session key hash) claims
+//! for stateful revocation with proof of possession.
 
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
@@ -20,8 +25,12 @@ pub enum JwtIssueError {
 /// Matches the format expected by JwtVerifier.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IssuedClaims {
-    /// Subject (user ID)
+    /// Subject (external identity: "auth:<user_id>")
     pub sub: String,
+    /// Session ID (for revocation)
+    pub sid: String,
+    /// Session key hash (proof of possession)
+    pub skh: String,
     /// Issuer
     pub iss: String,
     /// Audience
@@ -70,10 +79,19 @@ impl JwtIssuer {
         self
     }
 
-    /// Issue a JWT for an authenticated user.
+    /// Issue a JWT for an authenticated user with session binding.
+    ///
+    /// # Arguments
+    /// * `user_id` - External subject (e.g., "auth:abc123")
+    /// * `session_id` - Session ID for revocation
+    /// * `session_key_hash` - SHA256 of session key (proof of possession)
+    /// * `roles` - User roles
+    /// * `email` - Optional email
     pub fn issue(
         &self,
         user_id: &str,
+        session_id: &str,
+        session_key_hash: &str,
         roles: Vec<String>,
         email: Option<String>,
     ) -> Result<String, JwtIssueError> {
@@ -84,6 +102,8 @@ impl JwtIssuer {
 
         let claims = IssuedClaims {
             sub: user_id.to_string(),
+            sid: session_id.to_string(),
+            skh: session_key_hash.to_string(),
             iss: self.issuer.clone(),
             aud: self.audience.clone(),
             iat: now,
@@ -105,12 +125,18 @@ mod tests {
     use jsonwebtoken::{decode, DecodingKey, Validation};
 
     #[test]
-    fn test_issue_and_decode() {
+    fn test_issue_and_decode_with_session() {
         let secret = b"test-secret-key-for-testing-only";
         let issuer = JwtIssuer::new(secret.to_vec(), "https://singularity.local", "singularity");
 
         let token = issuer
-            .issue("user-123", vec!["admin".to_string()], Some("user@example.com".to_string()))
+            .issue(
+                "auth:user-123",
+                "session-456",
+                "abc123hash",
+                vec!["admin".to_string()],
+                Some("user@example.com".to_string()),
+            )
             .unwrap();
 
         // Decode and verify
@@ -121,7 +147,9 @@ mod tests {
 
         let decoded = decode::<IssuedClaims>(&token, &key, &validation).unwrap();
 
-        assert_eq!(decoded.claims.sub, "user-123");
+        assert_eq!(decoded.claims.sub, "auth:user-123");
+        assert_eq!(decoded.claims.sid, "session-456");
+        assert_eq!(decoded.claims.skh, "abc123hash");
         assert_eq!(decoded.claims.roles, vec!["admin"]);
         assert_eq!(decoded.claims.email, Some("user@example.com".to_string()));
     }
