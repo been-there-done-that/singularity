@@ -95,6 +95,9 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                 let mut exec_constraints = serde_json::Map::new();
                 if let Some(user_id) = ctx.internal_user_id() {
                      exec_constraints.insert("owner_id".to_string(), serde_json::json!(user_id));
+                     println!("DEBUG: StateBackedExecutor::Read - OwnerID: {}", user_id);
+                } else {
+                     println!("DEBUG: StateBackedExecutor::Read - No OwnerID");
                 }
                 
                 // Merge with detailed constraints from payload
@@ -220,6 +223,9 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                     // Enforcement: Always overwrite owner_id if we have a subject
                     if let Some(owner) = ctx.internal_user_id() {
                         obj.insert("owner_id".into(), serde_json::json!(owner));
+                        println!("DEBUG: StateBackedExecutor::Write - Injected OwnerID: {}", owner);
+                    } else {
+                        println!("DEBUG: StateBackedExecutor::Write - No OwnerID to inject");
                     }
                 }
 
