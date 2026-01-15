@@ -1,7 +1,7 @@
 use singularity::capability::{CapabilitySigner, CapabilityVerifier, SigningKey};
 use singularity::execution::{ExecutionContext, ExecutionMeta, ExecutionTarget, StateBackedExecutor, OperationExecutor};
 use singularity::migration::manager::MigrationManager;
-use singularity::protocol::{CapabilityPayload, FieldSet, Resource};
+use singularity::protocol::{CapabilityPayload, FieldSet, Resource, opcode::*};
 use singularity::state::{SqliteState, State};
 use serde_json::json;
 
@@ -35,9 +35,8 @@ fn test_schema_persistence_flow() {
 
     // 1. Create Model "test_model"
     let model_id = "m_test";
-    let create_op = "schema.create_model";
     let target_res = Resource::instance("__models", model_id);
-    let ctx = create_context(create_op, target_res.clone());
+    let ctx = create_context(SCHEMA_CREATE_MODEL, target_res.clone());
     let target = ExecutionTarget::new(target_res);
     
     let model_payload = json!({
@@ -50,9 +49,8 @@ fn test_schema_persistence_flow() {
 
     // 2. Add Field "title"
     let field_id = "f_title";
-    let add_op = "schema.add_field";
     let field_res = Resource::instance("__fields", field_id);
-    let ctx_field = create_context(add_op, field_res.clone());
+    let ctx_field = create_context(SCHEMA_ADD_FIELD, field_res.clone());
     let target_field = ExecutionTarget::new(field_res);
 
     let field_payload = json!({
@@ -68,12 +66,7 @@ fn test_schema_persistence_flow() {
     executor.execute(&ctx_field, &target_field, &meta, Some(field_payload)).expect("add field failed");
 
     // 3. Read Model back (should include fields)
-    let read_op = "resource.read"; // Internal read uses generic read? 
-    // Wait, StateBackedExecutor maps "resource.read" to state.read.
-    // User might need "schema.read_model" but currently generic read works if policy allows "resource.read" on "__models".
-    // Or we use "resource.read" with target "__models".
-    // Our executor allows "resource.read".
-    let ctx_read = create_context(read_op, Resource::instance("__models", model_id));
+    let ctx_read = create_context(RESOURCE_READ, Resource::instance("__models", model_id));
     let target_read = ExecutionTarget::new(Resource::instance("__models", model_id));
     
     let result = executor.execute(&ctx_read, &target_read, &meta, None).expect("read model failed");
@@ -89,10 +82,9 @@ fn test_schema_persistence_flow() {
     }
 
     // 4. Drop Field "title"
-    let drop_op = "schema.drop_field";
     // Target is the field instance
     let drop_res = Resource::instance("__fields", field_id);
-    let ctx_drop = create_context(drop_op, drop_res.clone());
+    let ctx_drop = create_context(SCHEMA_DROP_FIELD, drop_res.clone());
     let target_drop = ExecutionTarget::new(drop_res);
 
     executor.execute(&ctx_drop, &target_drop, &meta, None).expect("drop field failed");
@@ -114,7 +106,7 @@ fn test_schema_persistence_flow() {
         "namespace": "public",
         "created_at": 1234567895
     });
-    let ctx_model_users = create_context("schema.create_model", Resource::instance("__models", user_model_id));
+    let ctx_model_users = create_context(SCHEMA_CREATE_MODEL, Resource::instance("__models", user_model_id));
     executor.execute(&ctx_model_users, &ExecutionTarget::new(Resource::instance("__models", user_model_id)), &meta, Some(user_model_payload)).expect("create users model failed");
     
     // Add "age" field (Integer)
@@ -127,7 +119,7 @@ fn test_schema_persistence_flow() {
         "default": null,
         "created_at": 1234567896
     });
-    let ctx_field_age = create_context("schema.add_field", Resource::instance("__fields", "f_age"));
+    let ctx_field_age = create_context(SCHEMA_ADD_FIELD, Resource::instance("__fields", "f_age"));
     executor.execute(&ctx_field_age, &ExecutionTarget::new(Resource::instance("__fields", "f_age")), &meta, Some(age_field_payload)).expect("add age field failed");
 
     // Write data to "users" physical table
@@ -135,11 +127,11 @@ fn test_schema_persistence_flow() {
     let user_payload = json!({
         "age": 30
     });
-    let ctx_write_user = create_context("resource.create", Resource::instance("users", user_id));
+    let ctx_write_user = create_context(RESOURCE_CREATE, Resource::instance("users", user_id));
     executor.execute(&ctx_write_user, &ExecutionTarget::new(Resource::instance("users", user_id)), &meta, Some(user_payload)).expect("write user failed");
 
     // Read back user
-    let ctx_read_user = create_context("resource.read", Resource::instance("users", user_id));
+    let ctx_read_user = create_context(RESOURCE_READ, Resource::instance("users", user_id));
     let read_result = executor.execute(&ctx_read_user, &ExecutionTarget::new(Resource::instance("users", user_id)), &meta, None).expect("read user failed");
     
     if let singularity::execution::ExecutionResult::Read { data } = read_result {
@@ -153,7 +145,7 @@ fn test_schema_persistence_flow() {
         "age": "thirty" // Should fail or error in STRICT mode (or rusqlite conversion)
     });
     // With our current logic, "thirty" is passed as string to INTEGER column. STRICT table should reject.
-    let ctx_write_invalid = create_context("resource.create", Resource::instance("users", "invalid_user"));
+    let ctx_write_invalid = create_context(RESOURCE_CREATE, Resource::instance("users", "invalid_user"));
     let err = executor.execute(&ctx_write_invalid, &ExecutionTarget::new(Resource::instance("users", "invalid_user")), &meta, Some(invalid_payload));
     
     assert!(err.is_err(), "Should fail to write string to integer column in STRICT table");
@@ -170,9 +162,8 @@ fn test_schema_introspection_access_control() {
 
     // 1. User A creates "model_a"
     let model_id = "m_model_a";
-    let create_op = "schema.create_model";
     let target_res = Resource::instance("__models", model_id);
-    let ctx_a_create = create_context_with_user(create_op, target_res.clone(), user_a);
+    let ctx_a_create = create_context_with_user(SCHEMA_CREATE_MODEL, target_res.clone(), user_a);
     let target = ExecutionTarget::new(target_res);
     
     let model_payload = json!({
@@ -184,9 +175,8 @@ fn test_schema_introspection_access_control() {
     executor.execute(&ctx_a_create, &target, &meta, Some(model_payload)).expect("User A create model failed");
 
     // 2. User A lists models -> Should see "model_a"
-    let list_op = "schema.list_models";
     let list_res = Resource::collection("__models");
-    let ctx_a_list = create_context_with_user(list_op, list_res.clone(), user_a);
+    let ctx_a_list = create_context_with_user(SCHEMA_LIST_MODELS, list_res.clone(), user_a);
     let target_list = ExecutionTarget::new(list_res);
 
     let result_a = executor.execute(&ctx_a_list, &target_list, &meta, None).expect("User A list failed");
@@ -200,7 +190,7 @@ fn test_schema_introspection_access_control() {
     }
 
     // 3. User B lists models -> Should NOT see "model_a" (Empty list or filtered)
-    let ctx_b_list = create_context_with_user(list_op, Resource::collection("__models"), user_b);
+    let ctx_b_list = create_context_with_user(SCHEMA_LIST_MODELS, Resource::collection("__models"), user_b);
     let result_b = executor.execute(&ctx_b_list, &target_list, &meta, None).expect("User B list failed");
 
     if let singularity::execution::ExecutionResult::Read { data } = result_b {
@@ -212,8 +202,7 @@ fn test_schema_introspection_access_control() {
     }
 
     // 4. User B tries to READ "model_a" directly -> Should be NOT FOUND (due to RLS)
-    let read_op = "resource.read";
-    let ctx_b_read = create_context_with_user(read_op, Resource::instance("__models", model_id), user_b);
+    let ctx_b_read = create_context_with_user(RESOURCE_READ, Resource::instance("__models", model_id), user_b);
     let target_read = ExecutionTarget::new(Resource::instance("__models", model_id));
 
     let result_b_read = executor.execute(&ctx_b_read, &target_read, &meta, None);
@@ -227,7 +216,7 @@ fn test_schema_introspection_access_control() {
     }
 
     // 5. User A reads "model_a" -> Success
-    let ctx_a_read = create_context_with_user(read_op, Resource::instance("__models", model_id), user_a);
+    let ctx_a_read = create_context_with_user(RESOURCE_READ, Resource::instance("__models", model_id), user_a);
     let result_a_read = executor.execute(&ctx_a_read, &target_read, &meta, None);
     assert!(result_a_read.is_ok(), "User A should read model_a");
 }
@@ -241,7 +230,7 @@ fn test_schema_introspection_enrichment() {
 
     // 1. Create Model
     let model_id = "m_enrich";
-    let ctx = create_context_with_user("schema.create_model", Resource::instance("__models", model_id), user_a);
+    let ctx = create_context_with_user(SCHEMA_CREATE_MODEL, Resource::instance("__models", model_id), user_a);
     let target = ExecutionTarget::new(Resource::instance("__models", model_id));
     
     // Payload uses implicit owner injection (Source of Truth hardening verified implicitly)
@@ -254,7 +243,7 @@ fn test_schema_introspection_enrichment() {
 
     // 2. List Models (Introspection)
     // op must be "schema.list_models" to trigger enrichment logic
-    let ctx_list = create_context_with_user("schema.list_models", Resource::collection("__models"), user_a);
+    let ctx_list = create_context_with_user(SCHEMA_LIST_MODELS, Resource::collection("__models"), user_a);
     let target_list = ExecutionTarget::new(Resource::collection("__models"));
 
     let result = executor.execute(&ctx_list, &target_list, &meta, None).expect("list failed");

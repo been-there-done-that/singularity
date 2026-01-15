@@ -115,14 +115,31 @@ pub const SCHEMA_CREATE_INDEX: &str = "schema.create_index";
 /// Reserved: Remove an Index from a Model.
 pub const SCHEMA_DROP_INDEX: &str = "schema.drop_index";
 
+// Resource Opcodes
+pub const RESOURCE_CREATE: &str = "resource.create";
+pub const RESOURCE_READ: &str = "resource.read";
+pub const RESOURCE_UPDATE: &str = "resource.update";
+pub const RESOURCE_DELETE: &str = "resource.delete";
+pub const RESOURCE_COUNT: &str = "resource.count";
+
+// User Opcodes
+pub const USER_CREATE: &str = "user.create";
+pub const USER_READ: &str = "user.read";
+pub const USER_UPDATE: &str = "user.update";
+pub const USER_DELETE: &str = "user.delete";
+
+// Document Opcodes
+pub const DOCUMENT_CREATE: &str = "document.create";
+pub const DOCUMENT_READ: &str = "document.read";
+pub const DOCUMENT_UPDATE: &str = "document.update";
+pub const DOCUMENT_DELETE: &str = "document.delete";
+
 // Object Plane Opcodes
 pub const OBJECT_READ: &str = "object.read";
 pub const OBJECT_WRITE: &str = "object.write";
 pub const OBJECT_DELETE: &str = "object.delete";
 pub const OBJECT_LIST: &str = "object.list";
 pub const OBJECT_PRESIGN: &str = "object.presign";
-
-pub const RESOURCE_COUNT: &str = "resource.count";
 
 #[cfg(test)]
 mod tests {

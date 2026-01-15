@@ -14,6 +14,7 @@
 
 use crate::state::{State, StateError};
 use crate::object::ObjectManager;
+use crate::protocol::opcode::*;
 
 use super::context::{ExecutionContext, ExecutionMeta, ExecutionTarget};
 use super::executor::OperationExecutor;
@@ -90,7 +91,7 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
 
         match op {
             // READ operations
-            "resource.read" | "user.read" | "document.read" => {
+            RESOURCE_READ | USER_READ | DOCUMENT_READ => {
                 // automatic owner filtering for strict mode
                 let mut exec_constraints = serde_json::Map::new();
                 if let Some(user_id) = ctx.internal_user_id() {
@@ -127,7 +128,7 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                 Ok(ExecutionResult::read(filtered))
             }
 
-            "schema.list_models" => {
+            SCHEMA_LIST_MODELS => {
                 // 1. Prepare constraints (Owner Filtering)
                 let mut exec_constraints = serde_json::Map::new();
                 if let Some(user_id) = ctx.internal_user_id() {
@@ -197,8 +198,8 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
             }
 
             // CREATE operations
-            "resource.create" | "user.create" | "document.create" | 
-            "schema.create_model" | "schema.add_field" | "schema.create_index" => {
+            RESOURCE_CREATE | USER_CREATE | DOCUMENT_CREATE | 
+            SCHEMA_CREATE_MODEL | SCHEMA_ADD_FIELD | SCHEMA_CREATE_INDEX => {
                 let mut payload = payload.ok_or_else(|| ExecutionError::ConstraintViolation {
                     constraint: "payload".to_string(),
                     reason: "create requires payload".to_string(),
@@ -242,7 +243,7 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
             }
 
             // UPDATE operations
-            "resource.update" | "user.update" | "document.update" => {
+            RESOURCE_UPDATE | USER_UPDATE | DOCUMENT_UPDATE => {
                 let mut payload = payload.ok_or_else(|| ExecutionError::ConstraintViolation {
                     constraint: "payload".to_string(),
                     reason: "update requires payload".to_string(),
@@ -268,8 +269,8 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
             }
 
             // DELETE operations
-            "resource.delete" | "user.delete" | "document.delete" |
-            "schema.drop_field" | "schema.drop_index" => {
+            RESOURCE_DELETE | USER_DELETE | DOCUMENT_DELETE |
+            SCHEMA_DROP_FIELD | SCHEMA_DROP_INDEX => {
                 // 1. Extract constraints from payload (if provided)
                 let mut exec_constraints = serde_json::Map::new();
                 if let Some(user_id) = ctx.internal_user_id() {
@@ -290,7 +291,7 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
 
                 // 2. Handle special case: schema.drop_field requires ID construction
                 let mut target = target.clone();
-                if op == "schema.drop_field" && target.resource.resource_id.is_none() {
+                if op == SCHEMA_DROP_FIELD && target.resource.resource_id.is_none() {
                     let p = c_val.as_ref().ok_or(ExecutionError::BadRequest("drop_field requires payload".into()))?;
                     let model_id = p.get("model_id").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("missing model_id".into()))?;
                     let name = p.get("name").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("missing name".into()))?;
@@ -308,7 +309,7 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
             }
 
             // OBJECT operations
-            "object.read" => {
+            OBJECT_READ => {
                 let namespace_id = &target.resource.resource_type;
                 let key = target.resource.resource_id.as_ref().ok_or(ExecutionError::BadRequest("Missing object key".into()))?;
 
@@ -337,7 +338,7 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                 Ok(ExecutionResult::Read { data: serde_json::json!({ "data": b64 }) })
             }
 
-            "object.write" => {
+            OBJECT_WRITE => {
                 let namespace_id = &target.resource.resource_type;
                 let key = target.resource.resource_id.as_ref().ok_or(ExecutionError::BadRequest("Missing object key".into()))?;
                 let payload = payload.ok_or(ExecutionError::BadRequest("Missing payload".into()))?;
@@ -368,7 +369,7 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                 Ok(ExecutionResult::Write { affected_count: 1 })
             }
 
-            "object.delete" => {
+            OBJECT_DELETE => {
                 let namespace_id = &target.resource.resource_type;
                 let key = target.resource.resource_id.as_ref().ok_or(ExecutionError::BadRequest("Missing object key".into()))?;
 
@@ -392,7 +393,7 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                 Ok(ExecutionResult::Write { affected_count: 1 })
             }
 
-            "object.list" => {
+            OBJECT_LIST => {
                  let namespace_id = &target.resource.resource_type;
                  let prefix = target.resource.resource_id.as_deref().unwrap_or("");
                  
@@ -425,7 +426,7 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                 Ok(ExecutionResult::Read { data: serde_json::Value::Array(json_entries) })
             }
 
-            "object.presign" => {
+            OBJECT_PRESIGN => {
                  let namespace_id = &target.resource.resource_type;
                  let key = target.resource.resource_id.as_deref().ok_or(ExecutionError::BadRequest("Missing object key".into()))?;
                  let payload = payload.ok_or(ExecutionError::BadRequest("Missing payload".into()))?;
@@ -464,7 +465,7 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
             }
 
             // COUNT operations
-            "resource.count" => {
+            RESOURCE_COUNT => {
                 // Owner filtering constraints
                 let mut exec_constraints = serde_json::Map::new();
                 if let Some(user_id) = ctx.internal_user_id() {
@@ -490,7 +491,7 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
             }
 
             // SCHEMA RENAME operations
-            "schema.rename_model" => {
+            SCHEMA_RENAME_MODEL => {
                 let payload = payload.ok_or(ExecutionError::BadRequest("Missing payload".into()))?;
                 let old_name = payload.get("old_name").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("Missing old_name".into()))?;
                 let new_name = payload.get("new_name").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("Missing new_name".into()))?;
@@ -530,7 +531,7 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                 }
             }
 
-            "schema.rename_field" => {
+            SCHEMA_RENAME_FIELD => {
                 let payload = payload.ok_or(ExecutionError::BadRequest("Missing payload".into()))?;
                 let table = payload.get("model").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("Missing model".into()))?;
                 let old_col = payload.get("old_name").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("Missing old_name".into()))?;
@@ -590,7 +591,7 @@ mod tests {
 
         // Write
         let ctx = create_context(
-            "resource.create",
+            RESOURCE_CREATE,
             Resource::instance("user", "test-123"),
             FieldSet::all(),
         );
@@ -605,7 +606,7 @@ mod tests {
 
         // Read
         let ctx = create_context(
-            "resource.read",
+            RESOURCE_READ,
             Resource::instance("user", "test-123"),
             FieldSet::all(),
         );
@@ -627,7 +628,7 @@ mod tests {
 
         // Create with all fields
         let ctx = create_context(
-            "resource.create",
+            RESOURCE_CREATE,
             Resource::instance("user", "filter-test"),
             FieldSet::all(),
         );
@@ -641,7 +642,7 @@ mod tests {
 
         // Read with limited fields
         let ctx = create_context(
-            "resource.read",
+            RESOURCE_READ,
             Resource::instance("user", "filter-test"),
             FieldSet::new(["name", "email"]),
         );
@@ -664,7 +665,7 @@ mod tests {
 
         // Try to write with limited fields
         let ctx = create_context(
-            "resource.create",
+            RESOURCE_CREATE,
             Resource::instance("user", "validate-test"),
             FieldSet::new(["name"]),
         );
@@ -689,7 +690,7 @@ mod tests {
 
         // Create
         let ctx = create_context(
-            "resource.create",
+            RESOURCE_CREATE,
             Resource::instance("user", "delete-test"),
             FieldSet::all(),
         );
@@ -698,7 +699,7 @@ mod tests {
 
         // Delete
         let ctx = create_context(
-            "resource.delete",
+            RESOURCE_DELETE,
             Resource::instance("user", "delete-test"),
             FieldSet::all(),
         );
@@ -707,7 +708,7 @@ mod tests {
 
         // Read after delete should fail
         let ctx = create_context(
-            "resource.read",
+            RESOURCE_READ,
             Resource::instance("user", "delete-test"),
             FieldSet::all(),
         );
