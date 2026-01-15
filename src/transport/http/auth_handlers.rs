@@ -246,3 +246,56 @@ pub async fn handle_me(
         expires_in,
     }))
 }
+
+/// Session status response.
+#[derive(Debug, Serialize)]
+pub struct SessionResponse {
+    pub valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in: Option<u64>,
+}
+
+/// GET /auth/session
+///
+/// Lightweight session validity check.
+/// Always returns 200 OK.
+pub async fn handle_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Json<SessionResponse> {
+    // 1. Extract token
+    let auth_header = match headers.get("authorization").and_then(|h| h.to_str().ok()) {
+        Some(h) if h.starts_with("Bearer ") => &h[7..],
+        _ => return Json(SessionResponse { valid: false, expires_in: None }),
+    };
+
+    // 2. Verify token format and signature
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let subject = match state.identity.verify(auth_header, now) {
+        Ok(s) => s,
+        Err(_) => return Json(SessionResponse { valid: false, expires_in: None }),
+    };
+
+    // 3. Verify Session (DB check)
+    let sid = match subject.claims.get("sid").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return Json(SessionResponse { valid: false, expires_in: None }),
+    };
+    let skh = match subject.claims.get("skh").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return Json(SessionResponse { valid: false, expires_in: None }),
+    };
+
+    if state.identity_service().verify_session(state.sqlite_state(), sid, skh).is_err() {
+        return Json(SessionResponse { valid: false, expires_in: None });
+    }
+
+    // 4. Calculate expiry
+    let exp = subject.claims.get("exp").and_then(|v| v.as_u64()).unwrap_or(0);
+    let expires_in = if exp > now { Some(exp - now) } else { Some(0) };
+
+    Json(SessionResponse {
+        valid: true,
+        expires_in,
+    })
+}
