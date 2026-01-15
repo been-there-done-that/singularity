@@ -11,7 +11,7 @@ use singularity::execution::{
     StateBackedExecutor, OperationExecutor,
 };
 use singularity::policy::{PolicyContext, PolicyEngine, PolicyEnv, PolicySubject};
-use singularity::protocol::{CapabilityPayload, FieldSet, Resource};
+use singularity::protocol::{CapabilityPayload, FieldSet, Resource, opcode::*};
 use singularity::state::SqliteState;
 
 /// Full kernel pipeline: Identity → Policy → Capability → Execution → State
@@ -21,20 +21,20 @@ fn e2e_create_and_read_resource() {
     let subject = PolicySubject::new("user-123").with_roles(["user"]);
 
     // --- Policy ---
-    let policy = r#"
-        op == "resource.create" || op == "resource.read"
-    "#;
+    let policy = format!(r#"
+        op == "{}" || op == "{}"
+    "#, RESOURCE_CREATE, RESOURCE_READ);
 
     let policy_engine = PolicyEngine::new();
     let ctx = PolicyContext::new(
         subject.clone(),
         Resource::instance("user", "e2e-1"),
-        "resource.create",
+        RESOURCE_CREATE,
         PolicyEnv::new(1704067200),
     );
 
-    let policy_result = policy_engine.evaluate(policy, &ctx).unwrap();
-    assert!(policy_result, "Policy must approve resource.create");
+    let policy_result = policy_engine.evaluate(&policy, &ctx).unwrap();
+    assert!(policy_result, "Policy must approve {}", RESOURCE_CREATE);
 
     // --- Capability minting ---
     let signing_key = SigningKey::generate();
@@ -43,7 +43,7 @@ fn e2e_create_and_read_resource() {
 
     let payload = CapabilityPayload::new(
         "cap-e2e",
-        "resource.create",
+        RESOURCE_CREATE,
         Resource::instance("user", "e2e-1"),
         FieldSet::all(),
         1704067200,
@@ -72,7 +72,7 @@ fn e2e_create_and_read_resource() {
     // --- Read back ---
     let read_payload = CapabilityPayload::new(
         "cap-e2e-read",
-        "resource.read",
+        RESOURCE_READ,
         Resource::instance("user", "e2e-1"),
         FieldSet::all(),
         1704067200,
@@ -106,7 +106,7 @@ fn e2e_policy_denial_blocks_flow() {
     let ctx = PolicyContext::new(
         subject,
         Resource::instance("secret", "data"),
-        "resource.read",
+        RESOURCE_READ,
         PolicyEnv::new(1704067200),
     );
 
@@ -128,7 +128,7 @@ fn e2e_field_filtering_enforced() {
     let ctx = PolicyContext::new(
         subject.clone(),
         Resource::instance("user", "filter-e2e"),
-        "resource.create",
+        RESOURCE_CREATE,
         PolicyEnv::new(1704067200),
     );
     assert!(policy_engine.evaluate(policy, &ctx).unwrap());
@@ -140,7 +140,7 @@ fn e2e_field_filtering_enforced() {
 
     let create_payload = CapabilityPayload::new(
         "cap-create",
-        "resource.create",
+        RESOURCE_CREATE,
         Resource::instance("user", "filter-e2e"),
         FieldSet::all(),
         1704067200,
@@ -164,7 +164,7 @@ fn e2e_field_filtering_enforced() {
     // Read with LIMITED fields capability
     let read_payload = CapabilityPayload::new(
         "cap-read-limited",
-        "resource.read",
+        RESOURCE_READ,
         Resource::instance("user", "filter-e2e"),
         FieldSet::new(["name", "email"]),  // NO secret field
         1704067200,
@@ -199,7 +199,7 @@ fn e2e_unauthorized_write_rejected() {
     // Capability only allows "name" field
     let payload = CapabilityPayload::new(
         "cap-limited",
-        "resource.create",
+        RESOURCE_CREATE,
         Resource::instance("user", "unauthorized-e2e"),
         FieldSet::new(["name"]),
         1704067200,
@@ -280,7 +280,7 @@ fn e2e_full_pipeline_jwt_to_state() {
     let policy_ctx = PolicyContext::new(
         subject.clone(),
         Resource::instance("document", "doc-new"),
-        "resource.create",
+        RESOURCE_CREATE,
         PolicyEnv::new(now),
     );
 
@@ -294,7 +294,7 @@ fn e2e_full_pipeline_jwt_to_state() {
 
     let cap_payload = CapabilityPayload::new(
         &format!("cap-{}", subject.id),
-        "resource.create",
+        RESOURCE_CREATE,
         Resource::instance("document", "doc-new"),
         FieldSet::new(["title", "content", "author"]),
         now,
@@ -328,7 +328,7 @@ fn e2e_full_pipeline_jwt_to_state() {
     // === STEP 6: Verify State ===
     let read_cap_payload = CapabilityPayload::new(
         "cap-read",
-        "resource.read",
+        RESOURCE_READ,
         Resource::instance("document", "doc-new"),
         FieldSet::all(),
         now,
@@ -369,7 +369,7 @@ fn e2e_full_pipeline_jwt_to_state() {
     let viewer_policy_ctx = PolicyContext::new(
         viewer_subject,
         Resource::instance("document", "unauthorized-doc"),
-        "resource.create",
+        RESOURCE_CREATE,
         PolicyEnv::new(now),
     );
 

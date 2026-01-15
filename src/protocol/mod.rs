@@ -7,7 +7,7 @@
 
 mod execute;
 mod grant;
-mod opcode;
+pub mod opcode;
 mod request;
 mod types;
 

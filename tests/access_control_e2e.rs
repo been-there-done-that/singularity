@@ -9,7 +9,7 @@ use std::sync::Arc;
 use singularity::capability::{CapabilitySigner, SigningKey};
 use singularity::identity::JwtVerifier;
 use singularity::policy::PolicyEngine;
-use singularity::protocol::{OpRequest, OpExecute, Resource};
+use singularity::protocol::{OpRequest, OpExecute, Resource, opcode::*};
 use singularity::state::SqliteState;
 use singularity::transport::AppState;
 use singularity::transport::http::app;
@@ -188,11 +188,10 @@ async fn test_provisioning_and_ownership() {
         &encoding_key
     ).expect("should encode admin token");
 
-    // 2. Admin creates "todo" model
     let create_model = make_request(
         &app,
         &admin_jwt,
-        "schema.create_model",
+        SCHEMA_CREATE_MODEL,
         Resource::instance("__models", "todo"),
         Some(json!({"name": "todo"})),
     ).await;
@@ -205,7 +204,7 @@ async fn test_provisioning_and_ownership() {
     let add_field = make_request(
         &app,
         &admin_jwt,
-        "schema.add_field",
+        SCHEMA_ADD_FIELD,
         Resource::instance("__fields", "field-title"),
         Some(json!({
             "model_id": "todo",
@@ -228,7 +227,7 @@ async fn test_provisioning_and_ownership() {
     let alice_create = make_request(
         &app,
         &alice_jwt,
-        "resource.create",
+        RESOURCE_CREATE,
         Resource::instance("todo", "todo-1"),
         Some(json!({"title": "Buy milk"})),
     ).await;
@@ -241,7 +240,7 @@ async fn test_provisioning_and_ownership() {
     let alice_read_grant = make_request(
         &app,
         &alice_jwt,
-        "resource.read",
+        RESOURCE_READ,
         Resource::instance("todo", "todo-1"),
         None,
     ).await.expect("Alice should get read grant");
@@ -253,7 +252,7 @@ async fn test_provisioning_and_ownership() {
     let bob_read = make_request(
         &app,
         &bob_jwt,
-        "resource.read",
+        RESOURCE_READ,
         Resource::instance("todo", "todo-1"),
         None,
     ).await;
@@ -284,7 +283,7 @@ async fn test_ownership_hardening() {
     let create_model = make_request(
         &app,
         &admin_jwt,
-        "schema.create_model",
+        SCHEMA_CREATE_MODEL,
         Resource::instance("__models", "todo"),
         Some(json!({"name": "todo"})),
     ).await;
@@ -295,7 +294,7 @@ async fn test_ownership_hardening() {
     let add_title = make_request(
         &app,
         &admin_jwt,
-        "schema.add_field",
+        SCHEMA_ADD_FIELD,
         Resource::instance("__fields", "field-title"),
         Some(json!({
             "model_id": "todo",
@@ -320,7 +319,7 @@ async fn test_ownership_hardening() {
     let create_req = make_request(
         &app,
         &alice_jwt,
-        "resource.create",
+        RESOURCE_CREATE,
         Resource::instance("todo", "todo-spoof"),
         Some(json!({
             "title": "Spoof Attempt",
@@ -339,7 +338,7 @@ async fn test_ownership_hardening() {
     let read_grant = make_request(
         &app,
         &alice_jwt,
-        "resource.read",
+        RESOURCE_READ,
         Resource::instance("todo", "todo-spoof"),
         None,
     ).await.unwrap();
@@ -354,7 +353,7 @@ async fn test_ownership_hardening() {
     let update_req = make_request(
         &app,
         &alice_jwt,
-        "resource.update",
+        RESOURCE_UPDATE,
         Resource::instance("todo", "todo-spoof"),
         Some(json!({
             "owner_id": "bob-target-id"
@@ -371,7 +370,7 @@ async fn test_ownership_hardening() {
     let read_again_grant = make_request(
         &app,
         &alice_jwt,
-        "resource.read",
+        RESOURCE_READ,
         Resource::instance("todo", "todo-spoof"),
         None,
     ).await.unwrap();

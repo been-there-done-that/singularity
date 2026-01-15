@@ -53,6 +53,7 @@ pub trait OperationExecutor {
 pub mod test_executor {
     use super::*;
     use crate::execution::constraint::validate_constraints;
+    use crate::protocol::opcode::*;
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
 
@@ -120,7 +121,7 @@ pub mod test_executor {
             let op = ctx.op().as_str();
 
             match op {
-                "resource.read" | "user.read" | "document.read" => {
+                RESOURCE_READ | USER_READ | DOCUMENT_READ => {
                     // READ operation
                     match current_state {
                         Some(data) => {
@@ -134,7 +135,7 @@ pub mod test_executor {
                         }),
                     }
                 }
-                "resource.create" | "user.create" | "document.create" => {
+                RESOURCE_CREATE | USER_CREATE | DOCUMENT_CREATE => {
                     // CREATE operation
                     let payload = payload.ok_or_else(|| ExecutionError::ConstraintViolation {
                         constraint: "payload".to_string(),
@@ -150,7 +151,7 @@ pub mod test_executor {
 
                     Ok(ExecutionResult::write(1))
                 }
-                "resource.update" | "user.update" | "document.update" => {
+                RESOURCE_UPDATE | USER_UPDATE | DOCUMENT_UPDATE => {
                     // UPDATE operation
                     let payload = payload.ok_or_else(|| ExecutionError::ConstraintViolation {
                         constraint: "payload".to_string(),
@@ -182,7 +183,7 @@ pub mod test_executor {
 
                     Ok(ExecutionResult::write(1))
                 }
-                "resource.delete" | "user.delete" | "document.delete" => {
+                RESOURCE_DELETE | USER_DELETE | DOCUMENT_DELETE => {
                     // DELETE operation
                     let mut storage = self.storage.write().unwrap();
 
@@ -243,7 +244,7 @@ pub mod test_executor {
             );
 
             let ctx = create_context(
-                "resource.read",
+                RESOURCE_READ,
                 Resource::instance("user", "123"),
                 FieldSet::new(["name", "email"]),
             );
@@ -266,7 +267,7 @@ pub mod test_executor {
             let executor = InMemoryExecutor::new();
 
             let ctx = create_context(
-                "resource.create",
+                RESOURCE_CREATE,
                 Resource::instance("user", "123"),
                 FieldSet::new(["name", "email"]),
             );
@@ -287,7 +288,7 @@ pub mod test_executor {
             let executor = InMemoryExecutor::new();
 
             let ctx = create_context(
-                "resource.read",
+                RESOURCE_READ,
                 Resource::instance("user", "123"),
                 FieldSet::all(),
             );
@@ -306,7 +307,7 @@ pub mod test_executor {
 
             // CREATE
             let ctx = create_context(
-                "resource.create",
+                RESOURCE_CREATE,
                 Resource::instance("user", "new-id"),
                 FieldSet::all(),
             );
@@ -322,7 +323,7 @@ pub mod test_executor {
 
             // READ
             let ctx = create_context(
-                "resource.read",
+                RESOURCE_READ,
                 Resource::instance("user", "new-id"),
                 FieldSet::all(),
             );
@@ -331,7 +332,7 @@ pub mod test_executor {
 
             // UPDATE
             let ctx = create_context(
-                "resource.update",
+                RESOURCE_UPDATE,
                 Resource::instance("user", "new-id"),
                 FieldSet::new(["name"]),
             );
@@ -345,7 +346,7 @@ pub mod test_executor {
 
             // DELETE
             let ctx = create_context(
-                "resource.delete",
+                RESOURCE_DELETE,
                 Resource::instance("user", "new-id"),
                 FieldSet::all(),
             );
@@ -354,7 +355,7 @@ pub mod test_executor {
 
             // READ after delete should fail
             let ctx = create_context(
-                "resource.read",
+                RESOURCE_READ,
                 Resource::instance("user", "new-id"),
                 FieldSet::all(),
             );
