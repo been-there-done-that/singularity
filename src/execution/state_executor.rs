@@ -198,7 +198,7 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
 
             // CREATE operations
             "resource.create" | "user.create" | "document.create" | 
-            "schema.create_model" | "schema.add_field" => {
+            "schema.create_model" | "schema.add_field" | "schema.create_index" => {
                 let mut payload = payload.ok_or_else(|| ExecutionError::ConstraintViolation {
                     constraint: "payload".to_string(),
                     reason: "create requires payload".to_string(),
@@ -269,7 +269,7 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
 
             // DELETE operations
             "resource.delete" | "user.delete" | "document.delete" |
-            "schema.drop_field" => {
+            "schema.drop_field" | "schema.drop_index" => {
                 // 1. Extract constraints from payload (if provided)
                 let mut exec_constraints = serde_json::Map::new();
                 if let Some(user_id) = ctx.internal_user_id() {

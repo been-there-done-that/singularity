@@ -110,6 +110,10 @@ pub const SCHEMA_RENAME_MODEL: &str = "schema.rename_model";
 pub const SCHEMA_RENAME_FIELD: &str = "schema.rename_field";
 /// Reserved: List Models.
 pub const SCHEMA_LIST_MODELS: &str = "schema.list_models";
+/// Reserved: Create an Index on a Model.
+pub const SCHEMA_CREATE_INDEX: &str = "schema.create_index";
+/// Reserved: Remove an Index from a Model.
+pub const SCHEMA_DROP_INDEX: &str = "schema.drop_index";
 
 // Object Plane Opcodes
 pub const OBJECT_READ: &str = "object.read";
