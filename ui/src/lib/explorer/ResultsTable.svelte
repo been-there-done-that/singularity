@@ -5,9 +5,11 @@
         rows: Row[];
         columns: string[];
         loading: boolean;
+        onEdit?: (row: Row) => void;
+        onDelete?: (row: Row) => void;
     }
 
-    let { rows, columns, loading }: Props = $props();
+    let { rows, columns, loading, onEdit, onDelete }: Props = $props();
 </script>
 
 <div class="flex-1 overflow-auto bg-zinc-900 relative">
@@ -28,11 +30,16 @@
                 {#if columns.length === 0}
                     <th class="px-4 py-2 text-xs font-semibold text-zinc-500 border-b border-zinc-800">No columns selected</th>
                 {/if}
+                {#if onEdit || onDelete}
+                     <th class="px-4 py-2 text-xs font-semibold text-zinc-500 uppercase tracking-wider border-b border-zinc-800 bg-zinc-900/90 w-20 text-right">
+                        Actions
+                     </th>
+                {/if}
             </tr>
         </thead>
         <tbody class="divide-y divide-zinc-800/50">
             {#each rows as row}
-                <tr class="hover:bg-white/5 transition-colors">
+                <tr class="group hover:bg-white/5 transition-colors">
                     {#each columns as col}
                         <td class="px-4 py-2 text-sm text-zinc-300 font-mono whitespace-nowrap">
                             {#if row[col] === null}
@@ -46,12 +53,36 @@
                             {/if}
                         </td>
                     {/each}
+                    {#if onEdit || onDelete}
+                        <td class="px-4 py-2 text-right whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity">
+                            <div class="flex items-center justify-end gap-2">
+                                {#if onEdit}
+                                    <button 
+                                        class="p-1 hover:text-emerald-400 text-zinc-500 transition-colors" 
+                                        onclick={() => onEdit(row)}
+                                        title="Edit"
+                                    >
+                                        ✎
+                                    </button>
+                                {/if}
+                                {#if onDelete}
+                                    <button 
+                                        class="p-1 hover:text-red-400 text-zinc-500 transition-colors" 
+                                        onclick={() => onDelete(row)}
+                                        title="Delete"
+                                    >
+                                        🗑
+                                    </button>
+                                {/if}
+                            </div>
+                        </td>
+                    {/if}
                 </tr>
             {/each}
             
             {#if rows.length === 0 && !loading}
                 <tr>
-                    <td colspan={columns.length || 1} class="px-4 py-12 text-center text-zinc-500 text-sm">
+                    <td colspan={(columns.length || 1) + (onEdit || onDelete ? 1 : 0)} class="px-4 py-12 text-center text-zinc-500 text-sm">
                         No results found
                     </td>
                 </tr>
