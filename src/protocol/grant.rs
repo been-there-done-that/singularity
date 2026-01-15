@@ -176,13 +176,14 @@ impl CapGrant {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::opcode::*;
     use serde_json::json;
 
     #[test]
     fn test_capability_payload_creation() {
         let payload = CapabilityPayload::new(
             "cap-001",
-            "resource.read",
+            RESOURCE_READ,
             Resource::instance("user", "123"),
             FieldSet::new(["name", "email"]),
             1704067200,
@@ -190,7 +191,7 @@ mod tests {
         );
 
         assert_eq!(payload.cap_id, "cap-001");
-        assert_eq!(payload.op.as_str(), "resource.read");
+        assert_eq!(payload.op.as_str(), RESOURCE_READ);
         assert!(!payload.is_expired_at(1704067230)); // 30 seconds in
         assert!(payload.is_expired_at(1704067260)); // exactly at expiry
         assert!(payload.is_expired_at(1704067300)); // after expiry
@@ -201,7 +202,7 @@ mod tests {
     fn test_capability_payload_invalid_expiry() {
         CapabilityPayload::new(
             "cap-bad",
-            "resource.read",
+            RESOURCE_READ,
             Resource::instance("user", "123"),
             FieldSet::all(),
             1704067260,
@@ -213,7 +214,7 @@ mod tests {
     fn test_capability_payload_with_constraints() {
         let payload = CapabilityPayload::new(
             "cap-002",
-            "resource.update",
+            RESOURCE_UPDATE,
             Resource::instance("document", "doc-456"),
             FieldSet::new(["content"]),
             1704067200,
@@ -229,7 +230,7 @@ mod tests {
     fn test_capability_payload_with_binding() {
         let payload = CapabilityPayload::new(
             "cap-003",
-            "resource.delete",
+            RESOURCE_DELETE,
             Resource::instance("file", "file-789"),
             FieldSet::all(),
             1704067200,

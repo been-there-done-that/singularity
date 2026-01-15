@@ -90,12 +90,12 @@ impl CapabilitySigner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{FieldSet, Resource};
+    use crate::protocol::{FieldSet, Resource, opcode::*};
 
     fn create_test_payload() -> CapabilityPayload {
         CapabilityPayload::new(
             "cap-test-001",
-            "resource.read",
+            RESOURCE_READ,
             Resource::instance("user", "123"),
             FieldSet::new(["name", "email"]),
             1704067200,
@@ -193,7 +193,7 @@ mod tests {
 
         let payload1 = CapabilityPayload::new(
             "cap-001",
-            "resource.read",
+            RESOURCE_READ,
             Resource::instance("user", "123"),
             FieldSet::all(),
             1704067200,
@@ -202,7 +202,7 @@ mod tests {
 
         let payload2 = CapabilityPayload::new(
             "cap-002", // Different ID
-            "resource.read",
+            RESOURCE_READ,
             Resource::instance("user", "123"),
             FieldSet::all(),
             1704067200,

@@ -142,6 +142,7 @@ impl PolicyContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::opcode::*;
 
     #[test]
     fn test_policy_subject_creation() {
@@ -183,12 +184,12 @@ mod tests {
         let resource = Resource::instance("document", "doc-123");
         let env = PolicyEnv::new(1704067200);
 
-        let ctx = PolicyContext::new(subject, resource, "resource.read", env)
+        let ctx = PolicyContext::new(subject, resource, RESOURCE_READ, env)
             .with_input(serde_json::json!({"page": 1}));
 
         assert_eq!(ctx.subject.id, "user-789");
         assert_eq!(ctx.resource.resource_type, "document");
-        assert_eq!(ctx.op.as_str(), "resource.read");
+        assert_eq!(ctx.op.as_str(), RESOURCE_READ);
         assert!(ctx.input.is_some());
     }
 }

@@ -67,19 +67,20 @@ impl OpRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::opcode::*;
     use serde_json::json;
 
     #[test]
     fn test_op_request_creation() {
         let req = OpRequest::new(
             "req-001",
-            "resource.read",
+            RESOURCE_READ,
             Resource::instance("user", "123"),
             1704067200,
         );
 
         assert_eq!(req.request_id, "req-001");
-        assert_eq!(req.op.as_str(), "resource.read");
+        assert_eq!(req.op.as_str(), RESOURCE_READ);
         assert_eq!(req.resource.resource_type, "user");
         assert_eq!(req.resource.resource_id, Some("123".to_string()));
         assert_eq!(req.timestamp, 1704067200);
@@ -105,7 +106,7 @@ mod tests {
     fn test_op_request_with_input() {
         let req = OpRequest::new(
             "req-003",
-            "resource.create",
+            RESOURCE_CREATE,
             Resource::collection("documents"),
             1704067200,
         )

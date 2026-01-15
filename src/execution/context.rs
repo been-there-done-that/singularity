@@ -219,7 +219,7 @@ mod tests {
     use super::*;
     use crate::capability::{CapabilitySigner, CapabilityVerifier, SigningKey};
     use crate::execution::ExecutionError;
-    use crate::protocol::CapabilityPayload;
+    use crate::protocol::{CapabilityPayload, opcode::*};
     use serde_json::json;
 
     fn create_verified_capability(
@@ -232,7 +232,7 @@ mod tests {
 
         let payload = CapabilityPayload::new(
             "cap-test",
-            "resource.read",
+            RESOURCE_READ,
             resource,
             fields,
             1704067200,
