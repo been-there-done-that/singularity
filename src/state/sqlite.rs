@@ -983,17 +983,38 @@ impl SqliteState {
         match resource_type {
             "__fields" => {
                 // Get model name and field name before deleting
-                let (model_id, name): (String, String) = conn.query_row(
-                    "SELECT model_id, name FROM __fields WHERE id = ?1",
-                    params![id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                ).map_err(|_| StateError::BadRequest(format!("field {} not found", id)))?;
+                let (model_id, name, model_name) = {
+                    let (model_id, name): (String, String) = conn.query_row(
+                        "SELECT model_id, name FROM __fields WHERE id = ?1",
+                        params![id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    ).map_err(|_| StateError::BadRequest(format!("field {} not found", id)))?;
 
-                let model_name: String = conn.query_row(
-                    "SELECT name FROM __models WHERE id = ?1",
-                    params![model_id],
-                    |row| row.get(0),
-                ).map_err(|_| StateError::BadRequest(format!("model {} not found", model_id)))?;
+                    let model_name: String = conn.query_row(
+                        "SELECT name FROM __models WHERE id = ?1",
+                        params![model_id],
+                        |row| row.get(0),
+                    ).map_err(|_| StateError::BadRequest(format!("model {} not found", model_id)))?;
+
+                    // 1. Find and delete indexes that use this field
+                    let mut idx_stmt = conn.prepare("SELECT id, name FROM __indexes WHERE fields LIKE ?1")
+                        .map_err(|e| StateError::InternalError(e.to_string()))?;
+                    let idx_info: Vec<(String, String)> = idx_stmt.query_map(params![format!("%{}%", id)], |row| Ok((row.get(0)?, row.get(1)?)))
+                        .map_err(|e| StateError::InternalError(e.to_string()))?
+                        .filter_map(Result::ok)
+                        .collect();
+
+                    for (idx_id, idx_name) in idx_info {
+                        conn.execute("DELETE FROM __indexes WHERE id = ?1", params![idx_id])
+                            .map_err(|e| StateError::InternalError(e.to_string()))?;
+                        
+                        let physical_idx_name = format!("idx_{}_{}", model_name, idx_name);
+                        conn.execute(&format!("DROP INDEX IF EXISTS \"{}\"", physical_idx_name), [])
+                            .map_err(|e| StateError::InternalError(e.to_string()))?;
+                    }
+
+                    (model_id, name, model_name)
+                };
 
                 let count = conn.execute(
                     "DELETE FROM __fields WHERE id = ?1",
@@ -1010,12 +1031,37 @@ impl SqliteState {
             // Models deletion should cascade from __models, but maybe safe to expose.
             "__models" => {
                 // Get model name before deleting
-                let model_name: String = conn.query_row(
-                    "SELECT name FROM __models WHERE id = ?1",
-                    params![id],
-                    |row| row.get(0),
-                ).map_err(|_| StateError::BadRequest(format!("model {} not found", id)))?;
+                let model_name: String = {
+                    let model_name: String = conn.query_row(
+                        "SELECT name FROM __models WHERE id = ?1",
+                        params![id],
+                        |row| row.get(0),
+                    ).map_err(|_| StateError::BadRequest(format!("model {} not found", id)))?;
 
+                    // 1. Delete associated indexes
+                    let mut idx_stmt = conn.prepare("SELECT name FROM __indexes WHERE model_id = ?1")
+                        .map_err(|e| StateError::InternalError(e.to_string()))?;
+                    let idx_names: Vec<String> = idx_stmt.query_map(params![id], |row| row.get(0))
+                        .map_err(|e| StateError::InternalError(e.to_string()))?
+                        .filter_map(Result::ok)
+                        .collect();
+
+                    for idx_name in idx_names {
+                        let physical_idx_name = format!("idx_{}_{}", model_name, idx_name);
+                        conn.execute(&format!("DROP INDEX IF EXISTS \"{}\"", physical_idx_name), [])
+                            .map_err(|e| StateError::InternalError(e.to_string()))?;
+                    }
+                    conn.execute("DELETE FROM __indexes WHERE model_id = ?1", params![id])
+                        .map_err(|e| StateError::InternalError(e.to_string()))?;
+
+                    // 2. Delete associated fields
+                    conn.execute("DELETE FROM __fields WHERE model_id = ?1", params![id])
+                        .map_err(|e| StateError::InternalError(e.to_string()))?;
+
+                    model_name
+                };
+
+                // 3. Delete the model
                 let count = conn.execute(
                     "DELETE FROM __models WHERE id = ?1",
                     params![id],
@@ -2221,6 +2267,85 @@ mod tests {
                 |_| Ok(true)
             ).unwrap_or(false);
             assert!(!exists, "Physical index should be dropped");
+        });
+    }
+
+    #[test]
+    fn test_schema_cascading_deletes() {
+        let mut state = create_state();
+        let migration_manager = crate::migration::manager::MigrationManager::new();
+        migration_manager.run(&mut state).unwrap();
+
+        // 1. Setup Model, Field, Index
+        state.write(
+            &create_target("__models", None),
+            &FieldSet::all(),
+            &json!({ "name": "posts", "namespace": "public" }),
+            None
+        ).unwrap();
+        let models = state.read(&create_target("__models", None), &FieldSet::all(), Some(&json!({ "name": "posts" }))).unwrap();
+        let model_id = models[0]["id"].as_str().unwrap().to_string();
+
+        state.write(
+            &create_target("__fields", None),
+            &FieldSet::all(),
+            &json!({ "model_id": model_id, "name": "slug", "field_type": { "type": "String" } }),
+            None
+        ).unwrap();
+        let slug_id = format!("{}-slug", model_id);
+
+        state.write(
+            &create_target("__indexes", None),
+            &FieldSet::all(),
+            &json!({ "model_id": model_id, "name": "idx_slug", "fields": [slug_id] }),
+            None
+        ).unwrap();
+
+        // 2. Delete Field -> Should delete Index
+        state.delete(&create_target("__fields", Some(&slug_id)), None).unwrap();
+
+        let indexes = state.read(&create_target("__indexes", None), &FieldSet::all(), Some(&json!({ "model_id": model_id }))).unwrap();
+        assert_eq!(indexes.as_array().unwrap().len(), 0, "Index should be deleted when field is deleted");
+
+        state.with_connection(|conn| {
+            let exists: bool = conn.query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name LIKE ?1",
+                params!["%idx_slug%"],
+                |_| Ok(true)
+            ).unwrap_or(false);
+            assert!(!exists, "Physical index should be dropped when field is deleted");
+        });
+
+        // 3. Re-add field and index for model delete test
+        state.write(
+            &create_target("__fields", None),
+            &FieldSet::all(),
+            &json!({ "model_id": model_id, "name": "slug", "field_type": { "type": "String" } }),
+            None
+        ).unwrap();
+        state.write(
+            &create_target("__indexes", None),
+            &FieldSet::all(),
+            &json!({ "model_id": model_id, "name": "idx_slug", "fields": [slug_id] }),
+            None
+        ).unwrap();
+
+        // 4. Delete Model -> Should delete Fields and Indexes
+        state.delete(&create_target("__models", Some(&model_id)), None).unwrap();
+
+        let fields = state.read(&create_target("__fields", None), &FieldSet::all(), Some(&json!({ "model_id": model_id }))).unwrap();
+        assert_eq!(fields.as_array().unwrap().len(), 0, "Fields should be deleted when model is deleted");
+
+        let indexes = state.read(&create_target("__indexes", None), &FieldSet::all(), Some(&json!({ "model_id": model_id }))).unwrap();
+        assert_eq!(indexes.as_array().unwrap().len(), 0, "Indexes should be deleted when model is deleted");
+
+        state.with_connection(|conn| {
+            let exists: bool = conn.query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name = 'posts'",
+                [],
+                |_| Ok(true)
+            ).unwrap_or(false);
+            assert!(!exists, "Physical table should be dropped when model is deleted");
         });
     }
 }
