@@ -124,9 +124,9 @@
 		<div class="space-y-4">
 			{#each models as model}
 				<a
-					href={model.isOwned ? `/schema/${model.name}` : '#'}
+					href={(model.isOwned || auth.isAdmin) ? `/schema/${model.name}` : '#'}
 					class="block bg-zinc-900 border border-zinc-800 rounded-xl p-6 transition-all
-						{model.isOwned
+						{(model.isOwned || auth.isAdmin)
 						? 'hover:border-zinc-700 cursor-pointer'
 						: 'opacity-60 cursor-not-allowed'}"
 				>
@@ -137,7 +137,7 @@
 								class="w-10 h-10 rounded-lg flex items-center justify-center
 								{model.isSystem
 									? 'bg-zinc-800'
-									: model.isOwned
+									: (model.isOwned || auth.isAdmin)
 										? 'bg-indigo-500/10'
 										: 'bg-zinc-800'}"
 							>
@@ -147,7 +147,7 @@
 											d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z"
 										/>
 									</svg>
-								{:else if model.isOwned}
+								{:else if model.isOwned || auth.isAdmin}
 									<svg class="w-5 h-5 text-indigo-400" fill="currentColor" viewBox="0 0 24 24">
 										<path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" />
 									</svg>
@@ -177,7 +177,7 @@
 							</div>
 						</div>
 
-						{#if model.isOwned}
+						{#if model.isOwned || auth.isAdmin}
 							<svg class="w-5 h-5 text-zinc-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
 								<path
 									stroke-linecap="round"

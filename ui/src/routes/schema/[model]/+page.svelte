@@ -8,6 +8,7 @@
 
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
+	import { auth } from '$lib/state/auth.svelte';
 	import { Button, DangerZone, EmptyState } from '$lib/ui';
 	import { executeWithCapability, KernelRequestError } from '$lib/kernel';
 	import AddFieldModal from './AddFieldModal.svelte';
@@ -23,7 +24,7 @@
 		name: string;
 		namespace: string;
 		createdAt: number;
-		ownership: { column: string; principal: string } | null;
+		isOwned: boolean;
 		fields: Array<{
 			name: string;
 			type: string;
@@ -85,16 +86,23 @@
 				name: String(modelData.name || modelName),
 				namespace: String(modelData.namespace || 'default'),
 				createdAt: Number(modelData.created_at) || 0,
-				ownership: modelData.ownership as { column: string; principal: string } | null,
-				fields: fieldList.map((f: Record<string, unknown>) => ({
-					name: String(f.name || ''),
-					type: String(f.field_type || 'text'),
-					required: Boolean(f.required),
-					unique: Boolean(f.unique_flag),
-					default: f.default_val ? String(f.default_val) : null,
-					// TODO: Use kernel metadata (f.is_system) when available
-					isSystem: SYSTEM_FIELDS.includes(String(f.name || ''))
-				}))
+				isOwned: modelData.owner_id === auth.subject?.id,
+				fields: fieldList.map((f: Record<string, unknown>) => {
+					const ft = f.field_type as any;
+					const typeName = (typeof ft === 'object' && ft !== null && ft.type) 
+						? String(ft.type) 
+						: String(f.field_type || 'text');
+
+					return {
+						name: String(f.name || ''),
+						type: typeName,
+						required: Boolean(f.required),
+						unique: Boolean(f.unique_flag),
+						default: f.default_val ? String(f.default_val) : null,
+						// TODO: Use kernel metadata (f.is_system) when available
+						isSystem: SYSTEM_FIELDS.includes(String(f.name || ''))
+					};
+				})
 			};
 		} catch (e) {
 			if (e instanceof KernelRequestError) {
@@ -194,7 +202,7 @@
 			<div>
 				<div class="flex items-center gap-3">
 					<h1 class="text-3xl font-bold text-white">{model.name}</h1>
-					{#if model.ownership}
+					{#if model.isOwned}
 						<span class="px-2 py-0.5 text-xs font-medium bg-indigo-500/10 text-indigo-400 rounded">
 							owned
 						</span>
@@ -206,19 +214,6 @@
 			</div>
 		</div>
 
-		<!-- Ownership Info -->
-		{#if model.ownership}
-			<div class="bg-indigo-500/5 border border-indigo-500/20 rounded-xl p-4 mb-6">
-				<div class="flex items-center gap-2 text-sm">
-					<svg class="w-4 h-4 text-indigo-400" fill="currentColor" viewBox="0 0 24 24">
-						<path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4z" />
-					</svg>
-					<span class="text-zinc-300">
-						Ownership enforced via <code class="text-indigo-400">{model.ownership.column}</code>
-					</span>
-				</div>
-			</div>
-		{/if}
 
 		<!-- Fields Table -->
 		<div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden mb-8">
