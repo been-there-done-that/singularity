@@ -1,31 +1,34 @@
 <script lang="ts">
 	import './layout.css';
 	import { Sidebar, Toast } from '$lib/ui';
-	import { setAuth } from '$lib/state/auth.svelte';
+	import { auth } from '$lib/state/auth.svelte';
+	import { page } from '$app/stores';
+	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 
 	let { children } = $props();
+	let mounted = $state(false);
 
 	onMount(() => {
-		// For development: auto-login with a dev JWT
-		// In production, this would come from your auth flow
-		if (import.meta.env.DEV) {
-			// Create a simple dev JWT (not for production!)
-			const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-			const payload = btoa(
-				JSON.stringify({
-					sub: 'dev-user',
-					roles: ['admin'],
-					iss: 'https://singularity.local',
-					aud: 'singularity',
-					exp: Math.floor(Date.now() / 1000) + 3600 // 1 hour
-				})
-			);
-			const signature = btoa('dev-signature');
-			const devJwt = `${header}.${payload}.${signature}`;
-			setAuth(devJwt);
+		mounted = true;
+	});
+
+	// Auth guard - redirect to login if not authenticated
+	// Only runs after mount to avoid SSR issues and give state time to initialize
+	$effect(() => {
+		if (!mounted) return;
+		
+		// Skip for login page
+		if ($page.url.pathname === '/login') return;
+		
+		// If not authenticated, redirect to login
+		if (!auth.isAuthenticated) {
+			goto('/login');
 		}
 	});
+
+	// Check if on login page (don't show sidebar)
+	const isLoginPage = $derived($page.url.pathname === '/login');
 </script>
 
 <svelte:head>
@@ -33,18 +36,28 @@
 	<meta name="description" content="Singularity Kernel Administration Console" />
 </svelte:head>
 
-<!-- App Shell -->
-<div class="flex min-h-screen">
-	<!-- Sidebar Navigation -->
-	<Sidebar />
+{#if isLoginPage}
+	<!-- Login page without sidebar -->
+	{@render children()}
+{:else if auth.isAuthenticated}
+	<!-- App Shell with sidebar (only if authenticated) -->
+	<div class="flex min-h-screen">
+		<!-- Sidebar Navigation -->
+		<Sidebar />
 
-	<!-- Main Content Area -->
-	<main class="flex-1 ml-64">
-		<div class="p-6">
-			{@render children()}
-		</div>
-	</main>
-</div>
+		<!-- Main Content Area -->
+		<main class="flex-1 ml-64">
+			<div class="p-6">
+				{@render children()}
+			</div>
+		</main>
+	</div>
+{:else}
+	<!-- Loading state while checking auth -->
+	<div class="min-h-screen flex items-center justify-center bg-zinc-950">
+		<div class="text-zinc-400">Checking authentication...</div>
+	</div>
+{/if}
 
 <!-- Global Toast Notifications -->
 <Toast />

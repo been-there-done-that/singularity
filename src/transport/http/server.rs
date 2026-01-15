@@ -12,6 +12,7 @@ use axum::http::Method;
 
 use crate::transport::AppState;
 use super::handlers::{handle_execute, handle_request};
+use super::auth_handlers::{handle_login, handle_register};
 
 /// Create the Axum router.
 pub fn app(state: AppState) -> Router {
@@ -22,6 +23,9 @@ pub fn app(state: AppState) -> Router {
         .allow_headers(Any);
 
     Router::new()
+        // Auth endpoints (no JWT required)
+        .route("/auth/login", post(handle_login))
+        .route("/auth/register", post(handle_register))
         // Intent declaration: JWT -> Capability
         .route("/v1/op/request", post(handle_request))
         // Execution: Capability -> State Change
@@ -32,4 +36,3 @@ pub fn app(state: AppState) -> Router {
         .layer(cors)
         .with_state(state)
 }
-

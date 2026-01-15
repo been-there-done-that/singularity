@@ -48,6 +48,11 @@ export async function requestCapability(input: OpRequestInput): Promise<CapGrant
     });
 }
 
+// Generate unique execute ID
+function generateExecuteId(): string {
+    return `exec-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
 /**
  * Phase 2: Execute an operation with a valid capability token.
  * 
@@ -67,7 +72,13 @@ export async function requestCapability(input: OpRequestInput): Promise<CapGrant
 export async function execute<T>(token: string, payload: unknown): Promise<T> {
     return kernelFetch<T>('/v1/op/execute', {
         method: 'POST',
-        body: { token, payload },
+        body: {
+            execute_id: generateExecuteId(),
+            token,
+            payload,
+            timestamp: Math.floor(Date.now() / 1000)
+        },
         jwt: auth.jwt
     });
 }
+
