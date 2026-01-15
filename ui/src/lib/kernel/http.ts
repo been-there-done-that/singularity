@@ -58,16 +58,23 @@ export async function kernelFetch<T>(
     });
 
     if (!response.ok) {
-        let errorBody: KernelError;
+        let errorBody: any;
         try {
             errorBody = await response.json();
+            // Handle variations in error response shape
+            if (!errorBody.message && errorBody.error) {
+                errorBody.message = errorBody.error;
+            }
+            if (!errorBody.code) {
+                errorBody.code = 'SERVER_ERROR';
+            }
         } catch {
             errorBody = {
                 code: 'NETWORK_ERROR',
                 message: `Request failed: ${response.status} ${response.statusText}`
             };
         }
-        throw KernelRequestError.fromKernelError(errorBody);
+        throw KernelRequestError.fromKernelError(errorBody as KernelError);
     }
 
     // Handle empty responses (204 No Content)

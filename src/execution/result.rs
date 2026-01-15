@@ -8,7 +8,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum ExecutionError {
     /// CAS-style constraint was violated.
-    #[error("constraint violation: {constraint} - {reason}")]
+    #[error("{reason}")]
     ConstraintViolation {
         constraint: String,
         reason: String,

@@ -13,7 +13,7 @@ pub enum StateError {
     },
 
     /// CAS-style constraint was violated.
-    #[error("constraint violation: {constraint} - {reason}")]
+    #[error("{reason}")]
     ConstraintViolation {
         constraint: String,
         reason: String,

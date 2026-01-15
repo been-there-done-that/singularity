@@ -85,8 +85,30 @@ impl IntoResponse for TransportError {
             },
         };
 
+        let code = match &self {
+            TransportError::Unauthorized(_) => "UNAUTHORIZED",
+            TransportError::SessionInvalid(_) => "SESSION_INVALID",
+            TransportError::PolicyDenied => "POLICY_DENIED",
+            TransportError::InvalidCapability(_) => "INVALID_CAPABILITY",
+            TransportError::BadRequest(_) => "BAD_REQUEST",
+            TransportError::Internal(_) => "INTERNAL_ERROR",
+            TransportError::Execution(e) => match e {
+                ExecutionError::ConstraintViolation { .. } => "CONSTRAINT_VIOLATION",
+                ExecutionError::ResourceNotFound { .. } => "NOT_FOUND",
+                ExecutionError::UnauthorizedFieldWrite { .. } => "UNAUTHORIZED_FIELD_WRITE",
+                _ => "EXECUTION_ERROR",
+            },
+            TransportError::State(e) => match e {
+                StateError::ConstraintViolation { .. } => "CONSTRAINT_VIOLATION",
+                StateError::NotFound { .. } => "NOT_FOUND",
+                _ => "STATE_ERROR",
+            },
+        };
+
         let body = Json(json!({
-            "error": message
+            "code": code,
+            "message": message,
+            "error": message // Backwards compatibility
         }));
 
         (status, body).into_response()
