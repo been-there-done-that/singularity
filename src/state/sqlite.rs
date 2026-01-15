@@ -110,6 +110,33 @@ impl SqliteState {
         Ok(has_user)
     }
 
+    /// Check if any admin user exists.
+    /// 
+    /// Returns Ok(true) if at least one user with 'admin' role exists.
+    pub fn has_admin_user(&self) -> Result<bool, StateError> {
+        let conn = self.conn.lock().unwrap();
+        
+        // First check if table exists
+        let table_exists: bool = conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='__internal_users'",
+            [],
+            |_| Ok(true)
+        ).unwrap_or(false);
+
+        if !table_exists {
+            return Ok(false);
+        }
+
+        // Check if any admin exists using json_each
+        let has_admin: bool = conn.query_row(
+            "SELECT 1 FROM __internal_users, json_each(roles) WHERE json_each.value = 'admin' LIMIT 1",
+            [],
+            |_| Ok(true)
+        ).unwrap_or(false);
+
+        Ok(has_admin)
+    }
+
     /// Initialize the state schema.
     fn initialize_schema(&self) -> Result<(), StateError> {
         let conn = self.conn.lock().unwrap();
