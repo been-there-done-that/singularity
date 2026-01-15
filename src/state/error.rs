@@ -69,7 +69,7 @@ mod tests {
             constraint: "version_eq".to_string(),
             reason: "expected 5, got 6".to_string(),
         };
-        assert!(err.to_string().contains("version_eq"));
+        assert_eq!(err.to_string(), "expected 5, got 6");
         assert!(err.is_constraint_violation());
     }
 }

@@ -350,13 +350,27 @@ impl SqliteState {
                 } else {
                     // Collection Read
                     let mut sql = "SELECT id, model_id, name, field_type, required, unique_flag, default_val, created_at FROM __fields".to_string();
+                    let mut where_clauses = Vec::new();
                     let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
                     if let Some(c) = constraints {
                         if let Some(name_filter) = c.get("name").and_then(|v| v.as_str()) {
-                            sql.push_str(" WHERE name = ?1");
+                            where_clauses.push(format!("name = ?{}", params_vec.len() + 1));
                             params_vec.push(Box::new(name_filter.to_string()));
                         }
+                        if let Some(model_id) = c.get("model_id").and_then(|v| v.as_str()) {
+                            where_clauses.push(format!("model_id = ?{}", params_vec.len() + 1));
+                            params_vec.push(Box::new(model_id.to_string()));
+                        }
+                        if let Some(owner_id) = c.get("owner_id").and_then(|v| v.as_str()) {
+                            where_clauses.push(format!("owner_id = ?{}", params_vec.len() + 1));
+                            params_vec.push(Box::new(owner_id.to_string()));
+                        }
+                    }
+
+                    if !where_clauses.is_empty() {
+                        sql.push_str(" WHERE ");
+                        sql.push_str(&where_clauses.join(" AND "));
                     }
 
                     let mut stmt = conn.prepare(&sql).map_err(|e| StateError::InternalError(e.to_string()))?;
@@ -434,32 +448,26 @@ impl SqliteState {
     fn read_internal_models(&self, conn: &rusqlite::Connection, id: Option<&str>, constraints: Option<&Value>) -> Result<Value, StateError> {
         if let Some(model_id) = id {
             // Instance Read
-             let mut stmt = conn.prepare("SELECT id, name, namespace, created_at, owner_id FROM __models WHERE id = ?1")
-                    .map_err(|e| StateError::InternalError(e.to_string()))?;
+             let mut stmt = conn.prepare(r#"
+                SELECT m.id, m.name, m.namespace, m.created_at, m.owner_id, u.external_subject
+                FROM __models m
+                LEFT JOIN __internal_users u ON m.owner_id = u.id
+                WHERE m.id = ?1
+             "#).map_err(|e| StateError::InternalError(e.to_string()))?;
                 let mut rows = stmt.query(params![model_id])
                     .map_err(|e| StateError::InternalError(e.to_string()))?;
                 
                 if let Some(row) = rows.next().map_err(|e| StateError::InternalError(e.to_string()))? {
-                    // Check ownership constraint if present?
-                    let owner: Option<String> = row.get(4).unwrap_or(None);
-                    // Standard constraint checking mechanism usually happens via SQL.
-                    // For now, we manually check if "owner_id" constraint is present.
+                    let owner_uuid: Option<String> = row.get(4).unwrap_or(None);
+                    let owner_sub: Option<String> = row.get(5).unwrap_or(None);
+
                     if let Some(c) = constraints {
                         if let Some(req_owner) = c.get("owner_id").and_then(|v| v.as_str()) {
-                             // System models (None owner) are visible to all? Or strict?
-                             // Strict: You see only what you own. None owner = System.
-                             // If I request my models, I shouldn't see system models?
-                             // Or should I see system models too?
-                             // "You can only see models YOU own"
-                             if let Some(actual) = &owner {
+                             if let Some(actual) = &owner_uuid {
                                  if actual != req_owner {
                                      return Err(StateError::NotFound { resource_type: "__models".into(), resource_id: model_id.into() });
                                  }
                              } else {
-                                 // System model. Allow read? 
-                                 // "Admin bypass" usually handled by not passing constraint?
-                                 // Or by policy. If constraint is passed, it implies filtering.
-                                 // Let's assume strict filtering: If constraint is owner_id=X, then only models owned by X.
                                  return Err(StateError::NotFound { resource_type: "__models".into(), resource_id: model_id.into() });
                              }
                         }
@@ -484,13 +492,14 @@ impl SqliteState {
                     }).map_err(|e| StateError::InternalError(e.to_string()))?;
 
                     let fields: Vec<Value> = fields_iter.filter_map(Result::ok).collect();
+                    let display_owner = owner_sub.or(owner_uuid).unwrap_or_else(|| "system".to_string());
 
                     Ok(json!({
                         "id": row.get::<_, String>(0).unwrap(),
                         "name": row.get::<_, String>(1).unwrap(),
                         "namespace": row.get::<_, String>(2).unwrap(),
                         "created_at": row.get::<_, i64>(3).unwrap(),
-                        "owner_id": owner.unwrap_or_else(|| "system".to_string()),
+                        "owner_id": display_owner,
                         "fields": fields
                     }))
                 } else {
@@ -501,48 +510,69 @@ impl SqliteState {
                 }
         } else {
             // Collection Read
-            let mut sql = "SELECT id, name, namespace, created_at, owner_id FROM __models".to_string();
+            let mut sql = r#"
+                SELECT 
+                    m.id, m.name, m.namespace, m.created_at, m.owner_id,
+                    u.external_subject,
+                    (SELECT COUNT(*) FROM __fields WHERE model_id = m.id) as field_count
+                FROM __models m
+                LEFT JOIN __internal_users u ON m.owner_id = u.id
+            "#.to_string();
+            let mut where_clauses = Vec::new();
             let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
             if let Some(c) = constraints {
                 if let Some(req_owner) = c.get("owner_id").and_then(|v| v.as_str()) {
-                    sql.push_str(" WHERE owner_id = ?1");
+                    where_clauses.push(format!("m.owner_id = ?{}", params_vec.len() + 1));
                     params_vec.push(Box::new(req_owner.to_string()));
                 }
+                if let Some(name) = c.get("name").and_then(|v| v.as_str()) {
+                    where_clauses.push(format!("m.name = ?{}", params_vec.len() + 1));
+                    params_vec.push(Box::new(name.to_string()));
+                }
+                if let Some(ns) = c.get("namespace").and_then(|v| v.as_str()) {
+                    where_clauses.push(format!("m.namespace = ?{}", params_vec.len() + 1));
+                    params_vec.push(Box::new(ns.to_string()));
+                }
+            }
+
+            if !where_clauses.is_empty() {
+                sql.push_str(" WHERE ");
+                sql.push_str(&where_clauses.join(" AND "));
             }
             
             let mut stmt = conn.prepare(&sql).map_err(|e| StateError::InternalError(e.to_string()))?;
             
-            // We need to convert to params slice.
-            // Since we have max 1 param, let's simplify.
             
-            let map_fn = |row: &rusqlite::Row| -> rusqlite::Result<(String, String, String, i64, Option<String>)> {
+            let map_fn = |row: &rusqlite::Row| -> rusqlite::Result<(String, String, String, i64, Option<String>, Option<String>, i64)> {
                  Ok((
                     row.get(0)?, 
                     row.get(1)?,
                     row.get(2)?,
                     row.get(3)?,
-                    row.get(4)?
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?
                 ))
             };
 
-            let rows_result = if params_vec.is_empty() {
-                stmt.query_map([], map_fn)
-            } else {
-                 stmt.query_map(params![params_vec[0]], map_fn)
-            };
+            let rows_result = stmt.query_map(rusqlite::params_from_iter(params_vec.iter()), map_fn);
 
             let rows = rows_result.map_err(|e| StateError::InternalError(e.to_string()))?;
             
             let mut models = Vec::new();
             for r in rows {
-                if let Ok((id, name, namespace, created_at, owner)) = r {
+                if let Ok((id, name, namespace, created_at, owner_uuid, owner_sub, field_count)) = r {
+                    // Favor external subject as owner_id for UI logic if available
+                    let display_owner = owner_sub.or(owner_uuid).unwrap_or_else(|| "system".to_string());
+
                     models.push(json!({
                         "id": id,
                         "name": name,
                         "namespace": namespace,
                         "created_at": created_at,
-                        "owner_id": owner.unwrap_or_else(|| "system".to_string()),
+                        "owner_id": display_owner,
+                        "field_count": field_count
                     }));
                 }
             }
@@ -639,7 +669,8 @@ impl SqliteState {
                 let unique = data["unique"].as_bool().unwrap_or(false);
                 let default_val = if data["default"].is_null() { None } else { Some(serde_json::to_string(&data["default"]).unwrap()) };
                 let created_at = data["created_at"].as_i64().unwrap_or(0);
-                
+                let owner_id = data["owner_id"].as_str();
+
                 // Fetch model name needed for physical table
                 let model_name: String = conn.query_row(
                     "SELECT name FROM __models WHERE id = ?1",
@@ -648,10 +679,15 @@ impl SqliteState {
                 ).map_err(|_| StateError::BadRequest(format!("model {} not found", model_id)))?;
 
                 conn.execute(
-                    "INSERT INTO __fields (id, model_id, name, field_type, required, unique_flag, default_val, created_at) 
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                     ON CONFLICT(id) DO UPDATE SET name=excluded.name, required=excluded.required, unique_flag=excluded.unique_flag, default_val=excluded.default_val",
-                    params![id, model_id, name, f_type, required, unique, default_val, created_at],
+                    "INSERT INTO __fields (id, model_id, name, field_type, required, unique_flag, default_val, owner_id, created_at) 
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     ON CONFLICT(id) DO UPDATE SET 
+                        name=excluded.name, 
+                        required=excluded.required, 
+                        unique_flag=excluded.unique_flag, 
+                        default_val=excluded.default_val,
+                        owner_id=excluded.owner_id",
+                    params![id, model_id, name, f_type, required, unique, default_val, owner_id, created_at],
                 ).map_err(|e| Self::map_sqlite_error(e, Some(&data)))?;
 
                 // Add col to physical table
