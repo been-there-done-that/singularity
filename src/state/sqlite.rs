@@ -16,6 +16,11 @@ use super::error::StateError;
 use super::traits::State;
 use crate::schema::validation::{validate_identifier, quote_identifier};
 use uuid::Uuid;
+use crate::executor as pap_executor;
+use crate::planner::LogicalPlan;
+use crate::protocol::data::PlanGrant;
+use crate::execution::ExecutionResult;
+
 
 /// SQLite state backend.
 ///
@@ -1856,8 +1861,24 @@ impl State for SqliteState {
             []
         ).map_err(|e| StateError::InternalError(e.to_string()))?;
 
-        Ok(())
     }
+
+    fn execute_plan(
+        &self,
+        plan: &LogicalPlan,
+        grant: &PlanGrant,
+        subject_id: Option<&str>,
+    ) -> Result<ExecutionResult, StateError> {
+        let conn = self.conn.lock().unwrap();
+
+        pap_executor::execute(
+            plan,
+            grant,
+            &conn,
+            subject_id,
+        ).map_err(|e| StateError::InternalError(e.to_string()))
+    }
+
 
     fn get_resource_owner(&self, resource_type: &str, resource_id: &str) -> Result<Option<String>, StateError> {
         let conn = self.conn.lock().unwrap();
