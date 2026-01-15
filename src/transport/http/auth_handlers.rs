@@ -8,12 +8,13 @@
 
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{StatusCode, HeaderMap},
     Json,
     response::{IntoResponse, Response},
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize; 
 
+use crate::identity::IdentityError;
 use crate::identity::provider::{
     AuthError, AuthResponse as ServiceAuthResponse, LoginRequest, RegisterRequest,
 };
@@ -37,12 +38,6 @@ impl From<ServiceAuthResponse> for AuthResponse {
             expires_in: r.expires_in,
         }
     }
-}
-
-/// Logout request.
-#[derive(Debug, Deserialize)]
-pub struct LogoutRequest {
-    pub session_id: String,
 }
 
 /// HTTP Error response.
@@ -97,8 +92,34 @@ pub async fn handle_register(
 /// POST /auth/logout
 pub async fn handle_logout(
     State(state): State<AppState>,
-    Json(req): Json<LogoutRequest>,
+    headers: HeaderMap,
 ) -> Result<StatusCode, AuthError> {
-    state.identity_service().logout(state.sqlite_state(), &req.session_id)?;
+    // 1. Extract token
+    let auth_header = headers.get("authorization")
+        .ok_or(AuthError::UserNotFound)? // Use appropriate low-level error or ignore
+        .to_str()
+        .map_err(|_| AuthError::Jwt(IdentityError::InvalidFormat("invalid header chars".into()).to_string()))?;
+    
+    if !auth_header.starts_with("Bearer ") {
+         return Err(AuthError::Jwt(IdentityError::InvalidFormat("missing Bearer scheme".into()).to_string()));
+    }
+    
+    let token = &auth_header[7..];
+
+    // 2. Verify token to get claims
+    // We swallow verification errors here - if the token is invalid/expired, we can just 
+    // return 204 because the client effectively considers itself logged out.
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    
+    let subject = match state.identity.verify(token, now) {
+        Ok(s) => s,
+        Err(_) => return Ok(StatusCode::NO_CONTENT) // Already invalid/expired -> success
+    };
+    
+    // 3. Extract Session ID
+    if let Some(sid) = subject.claims.get("sid").and_then(|v| v.as_str()) {
+        state.identity_service().logout(state.sqlite_state(), sid)?;
+    }
+    
     Ok(StatusCode::NO_CONTENT)
 }
