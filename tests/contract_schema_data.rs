@@ -166,7 +166,8 @@ async fn test_data_consistency_contracts() {
         
         let req = Request::builder().uri("/v1/op/execute").method("POST").header("Content-Type", "application/json")
             .body(Body::from(json!({ "execute_id": format!("exec-create-{}", cat), "token": cap, "payload": { "cat": cat }, "timestamp": 0 }).to_string())).unwrap();
-        let _ = app.clone().oneshot(req).await.unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "Write failed for cat={}", cat);
     }
     
     // 2.5 Query ALL items to verify persistence
@@ -181,6 +182,7 @@ async fn test_data_consistency_contracts() {
     let resp = app.clone().oneshot(req).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 4096).await.unwrap()).unwrap();
     let all_items = json.as_array().expect("Expected items array");
+    println!("DEBUG ITEMS: {:#?}", all_items);
     assert_eq!(all_items.len(), 3, "Should find 3 total items");
 
     // 3. Query with Filter (cat="A")

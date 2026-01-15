@@ -533,6 +533,40 @@ impl SqliteState {
                         params![f_id, id, f_name, f_type_str, required, f_name == "id", owner_id, created_at],
                     );
                 }
+                drop(conn); // Release lock before user fields loop
+
+                // 4. Register user generated fields
+                if let Some(fields) = data["fields"].as_array() {
+                    for field in fields {
+                        let f_name = field["name"].as_str().ok_or(StateError::BadRequest("field missing name".into()))?;
+                        let f_type_raw = field["type"].as_str().unwrap_or("text"); // Legacy/Simple
+                        
+                        // Map simple types to Kernel types
+                        let kernel_type = match f_type_raw {
+                            "text" | "string" => "String",
+                            "integer" | "int" => "Int",
+                            "float" | "number" => "Float",
+                            "boolean" | "bool" => "Bool",
+                            "json" => "Json",
+                            _ => "String",
+                        };
+
+                        let f_id = format!("{}-{}", id, f_name);
+                        let mut f_payload = field.clone();
+                        
+                        // Transform to full field payload
+                        if let Some(obj) = f_payload.as_object_mut() {
+                            obj.insert("model_id".into(), serde_json::json!(id));
+                            obj.insert("owner_id".into(), serde_json::json!(owner_id));
+                            // Map "type": "text" -> "field_type": { "type": "String" }
+                            if !obj.contains_key("field_type") {
+                                obj.insert("field_type".into(), serde_json::json!({ "type": kernel_type }));
+                            }
+                        }
+                        
+                        self.write_internal("__fields", &f_id, f_payload)?;
+                    }
+                }
                 
                 Ok(1)
             },
@@ -1073,6 +1107,7 @@ impl State for SqliteState {
                          u_idx
                      );
 
+                     
                      let affected = conn.execute(&update_sql, rusqlite::params_from_iter(update_values.iter()))
                          .map_err(|e| StateError::InternalError(e.to_string()))?;
 
@@ -1114,12 +1149,12 @@ impl State for SqliteState {
                          table_name,
                          col_names.join(", "),
                          placeholders.join(", ")
-                     );
+                      );
 
-                     conn.execute(&insert_sql, rusqlite::params_from_iter(insert_values.iter()))
+                     let affected = conn.execute(&insert_sql, rusqlite::params_from_iter(insert_values.iter()))
                          .map_err(|e| StateError::InternalError(e.to_string()))?;
-                         
-                     return Ok(1);
+                     
+                     return Ok(affected as u64);
                 },
                 _ => return Err(StateError::BadRequest("payload must be an object".to_string())),
             }
@@ -1343,9 +1378,23 @@ impl State for SqliteState {
              let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
              
              if let Some(c) = constraints {
-                 if let Some(owner) = c.get("owner_id").and_then(|v| v.as_str()) {
-                     where_clauses.push("owner_id = ?");
-                     params_vec.push(Box::new(owner.to_string()));
+                 if let Some(obj) = c.as_object() {
+                     for (k, v) in obj {
+                         if k == "version_eq" || k == "not_deleted" || k == "exists" { continue; }
+                         
+                         where_clauses.push(format!("{} = ?", quote_identifier(k)));
+                         match v {
+                             Value::String(s) => params_vec.push(Box::new(s.clone())),
+                             Value::Number(n) => {
+                                 if let Some(i) = n.as_i64() { params_vec.push(Box::new(i)); }
+                                 else if let Some(f) = n.as_f64() { params_vec.push(Box::new(f)); }
+                                 else { params_vec.push(Box::new(n.to_string())); }
+                             },
+                             Value::Bool(b) => params_vec.push(Box::new(if *b { 1 } else { 0 })),
+                             Value::Null => params_vec.push(Box::new(rusqlite::types::Null)),
+                             _ => params_vec.push(Box::new(v.to_string())),
+                         }
+                     }
                  }
              }
 
