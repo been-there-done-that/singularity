@@ -124,6 +124,10 @@ pub trait State: Send + Sync {
 
     /// Get the capabilities of this state backend.
     fn capabilities(&self) -> &StateCapabilities;
+
+    /// Get current schema version.
+    /// Returns None if version table doesn't exist.
+    fn get_schema_version(&self) -> Result<Option<u64>, StateError>;
 }
 
 #[cfg(test)]
