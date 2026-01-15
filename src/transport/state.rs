@@ -67,5 +67,17 @@ impl AppState {
     pub fn sqlite_state(&self) -> &SqliteState {
         &self.state
     }
+
+    // ========================================================================
+    // System Lifecycle
+    // ========================================================================
+
+    /// Check if the system bootstrap is complete (at least one internal user exists).
+    /// 
+    /// This is a semantic wrapper — SqliteState knows about users,
+    /// AppState knows about bootstrap lifecycle.
+    pub fn is_bootstrap_complete(&self) -> bool {
+        self.state.has_any_internal_user().unwrap_or(false)
+    }
 }
 
