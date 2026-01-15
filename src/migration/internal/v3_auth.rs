@@ -23,6 +23,7 @@ impl InternalMigration for V3Auth {
                 username TEXT UNIQUE NOT NULL,
                 email TEXT,
                 email_verified INTEGER DEFAULT 0,
+                roles TEXT NOT NULL DEFAULT '[\"user\"]',
                 created_at INTEGER NOT NULL
             );"
         ).map_err(|e| TransportError::Internal(e.to_string()))?;

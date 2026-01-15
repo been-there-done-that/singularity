@@ -34,6 +34,7 @@ use crate::state::SqliteState;
 use thiserror::Error;
 use uuid::Uuid;
 use rusqlite::params;
+use serde_json::json;
 
 #[derive(Debug, Error)]
 pub enum AuthError {
@@ -201,62 +202,8 @@ impl IdentityService {
 
     /// Register a new user.
     pub fn register(&self, state: &SqliteState, req: RegisterRequest) -> Result<AuthResponse, AuthError> {
-        // 1. Check if username exists
-        let exists = state.with_connection(|conn| {
-            conn.query_row(
-                "SELECT 1 FROM __auth_users WHERE username = ?1 LIMIT 1",
-                params![&req.username],
-                |_| Ok(true)
-            ).unwrap_or(false)
-        });
-        
-        if exists {
-            return Err(AuthError::UsernameExists);
-        }
-
-        // 2. Check if email exists (if provided)
-        if let Some(ref email) = req.email {
-            let email_exists = state.with_connection(|conn| {
-                conn.query_row(
-                    "SELECT 1 FROM __auth_users WHERE email = ?1 LIMIT 1",
-                    params![email],
-                    |_| Ok(true)
-                ).unwrap_or(false)
-            });
-            
-            if email_exists {
-                return Err(AuthError::EmailExists);
-            }
-        }
-
-        // 3. Hash password
-        let password_hash = hash_password(&req.password)?;
-
-        // 4. Create auth user
-        let auth_user_id = Uuid::new_v4().to_string();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-
-        // Insert into __auth_users
-        state.with_connection(|conn| {
-            conn.execute(
-                "INSERT INTO __auth_users (id, username, email, email_verified, created_at) VALUES (?1, ?2, ?3, 0, ?4)",
-                params![&auth_user_id, &req.username, &req.email, now]
-            )
-        }).map_err(|e| AuthError::Storage(e.to_string()))?;
-
-        // Insert into __auth_secrets
-        state.with_connection(|conn| {
-            conn.execute(
-                "INSERT INTO __auth_secrets (user_id, password_hash, updated_at) VALUES (?1, ?2, ?3)",
-                params![&auth_user_id, &password_hash, now]
-            )
-        }).map_err(|e| AuthError::Storage(e.to_string()))?;
-
-        // 5. Create session and issue JWT (default to user role)
-        self.create_session_and_jwt(state, &auth_user_id, req.email, req.device_name, vec!["user".to_string()])
+        let roles = vec!["user".to_string()];
+        self.register_with_roles(state, req, roles)
     }
 
     /// Register a new user with explicit roles.
@@ -268,6 +215,7 @@ impl IdentityService {
         req: RegisterRequest,
         roles: Vec<String>,
     ) -> Result<AuthResponse, AuthError> {
+        tracing::info!(username = %req.username, ?roles, "Attempting registration with roles");
         // 1. Check if username exists
         let exists = state.with_connection(|conn| {
             conn.query_row(
@@ -307,10 +255,13 @@ impl IdentityService {
             .as_secs() as i64;
 
         // Insert into __auth_users
+        let roles_json = serde_json::to_string(&roles)
+            .map_err(|e| AuthError::Storage(format!("failed to serialize roles: {}", e)))?;
+
         state.with_connection(|conn| {
             conn.execute(
-                "INSERT INTO __auth_users (id, username, email, email_verified, created_at) VALUES (?1, ?2, ?3, 0, ?4)",
-                params![&auth_user_id, &req.username, &req.email, now]
+                "INSERT INTO __auth_users (id, username, email, email_verified, roles, created_at) VALUES (?1, ?2, ?3, 0, ?4, ?5)",
+                params![&auth_user_id, &req.username, &req.email, &roles_json, now]
             )
         }).map_err(|e| AuthError::Storage(e.to_string()))?;
 
@@ -329,15 +280,18 @@ impl IdentityService {
     /// Login with username and password.
     pub fn login(&self, state: &SqliteState, req: LoginRequest) -> Result<AuthResponse, AuthError> {
         // 1. Find user by username
-        let user: Result<(String, Option<String>), AuthError> = state.with_connection(|conn| {
+        let user: Result<(String, Option<String>, String), AuthError> = state.with_connection(|conn| {
             conn.query_row(
-                "SELECT id, email FROM __auth_users WHERE username = ?1 LIMIT 1",
+                "SELECT id, email, roles FROM __auth_users WHERE username = ?1 LIMIT 1",
                 params![&req.username],
-                |row| Ok((row.get(0)?, row.get(1)?))
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             ).map_err(|_| AuthError::UserNotFound)
         });
 
-        let (auth_user_id, email) = user?;
+        let (auth_user_id, email, roles_json) = user?;
+
+        let roles: Vec<String> = serde_json::from_str(&roles_json)
+            .map_err(|e| AuthError::Storage(format!("failed to parse roles: {}", e)))?;
 
         // 2. Get password hash
         let stored_hash: Result<String, AuthError> = state.with_connection(|conn| {
@@ -356,7 +310,7 @@ impl IdentityService {
         }
 
         // 4. Create session and issue JWT
-        self.create_session_and_jwt(state, &auth_user_id, email, req.device_name, vec!["user".to_string()])
+        self.create_session_and_jwt(state, &auth_user_id, email, req.device_name, roles)
     }
 
     /// Promote an existing user to admin.
@@ -364,16 +318,17 @@ impl IdentityService {
     /// Used by bootstrap flow to recover from failed registration where
     /// the user was created but admin role was not assigned.
     pub fn promote_to_admin(&self, state: &SqliteState, req: RegisterRequest) -> Result<AuthResponse, AuthError> {
+        tracing::info!(username = %req.username, "Attempting to promote existing user to admin");
         // 1. Find user by username
-        let user: Result<(String, Option<String>), AuthError> = state.with_connection(|conn| {
+        let user: Result<(String, Option<String>, String), AuthError> = state.with_connection(|conn| {
             conn.query_row(
-                "SELECT id, email FROM __auth_users WHERE username = ?1 LIMIT 1",
+                "SELECT id, email, roles FROM __auth_users WHERE username = ?1 LIMIT 1",
                 params![&req.username],
-                |row| Ok((row.get(0)?, row.get(1)?))
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             ).map_err(|_| AuthError::UserNotFound)
         });
 
-        let (auth_user_id, email) = user?;
+        let (auth_user_id, email, _current_roles_json) = user?;
 
         // 2. Get password hash
         let stored_hash: Result<String, AuthError> = state.with_connection(|conn| {
@@ -391,8 +346,20 @@ impl IdentityService {
             return Err(AuthError::InvalidCredentials);
         }
 
-        // 4. Create session and issue JWT with admin role
-        self.create_session_and_jwt(state, &auth_user_id, email, req.device_name, vec!["admin".to_string()])
+        // 4. Update roles in DB
+        let roles = vec!["admin".to_string()];
+        let roles_json = serde_json::to_string(&roles)
+            .map_err(|e| AuthError::Storage(format!("failed to serialize roles: {}", e)))?;
+
+        state.with_connection(|conn| {
+            conn.execute(
+                "UPDATE __auth_users SET roles = ?1 WHERE id = ?2",
+                params![&roles_json, &auth_user_id]
+            )
+        }).map_err(|e| AuthError::Storage(e.to_string()))?;
+
+        // 5. Create session and issue JWT with admin role
+        self.create_session_and_jwt(state, &auth_user_id, email, req.device_name, roles)
     }
 
     /// Revoke a session (logout).
