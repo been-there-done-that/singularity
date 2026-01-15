@@ -139,6 +139,25 @@ pub fn process_request(
     )?;
 
     if !auth_result.allowed {
+        // First consumer of explainability: structured denial logging
+        let explanation = evaluate_policy(
+            &app.policy,
+            &app.system_policy,
+            &policy_ctx,
+            AuthorizationMode::Explain,
+        ).ok().and_then(|r| r.explanation);
+        
+        if let Some(decision) = explanation {
+            tracing::warn!(
+                op = %decision.op,
+                subject_id = %decision.subject.id,
+                roles = ?decision.subject.roles,
+                is_owner = decision.ownership.is_owner,
+                policy_result = ?decision.policy.result,
+                "Policy denied request"
+            );
+        }
+        
         return Err(TransportError::PolicyDenied);
     }
 
