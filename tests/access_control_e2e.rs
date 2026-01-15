@@ -71,7 +71,11 @@ async fn make_request(
     let resp = tower::util::ServiceExt::oneshot(app.clone(), req).await.unwrap();
     
     if resp.status() != StatusCode::OK {
-        return Err(resp.status());
+        let status = resp.status();
+        // For debugging 500s/403s in tests
+        let bytes = axum::body::to_bytes(resp.into_body(), 2048).await.unwrap();
+        // Request failed, but we return the status
+        return Err(status);
     }
 
     let bytes = axum::body::to_bytes(resp.into_body(), 2048).await.unwrap();
@@ -105,7 +109,10 @@ async fn execute_cap(
     let resp = tower::util::ServiceExt::oneshot(app.clone(), req).await.unwrap();
     
     if resp.status() != StatusCode::OK {
-        return Err(resp.status());
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 2048).await.unwrap();
+        // Execution failed, but we return the status
+        return Err(status);
     }
 
     let bytes = axum::body::to_bytes(resp.into_body(), 2048).await.unwrap();
@@ -143,23 +150,14 @@ fn create_app() -> axum::Router {
 #[tokio::test]
 async fn test_provisioning_and_ownership() {
     let app = create_app();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
 
     // 1. Register users: admin, alice, bob
     let (admin_jwt, _) = register_user(&app, "admin", "adminpass123").await;
     let (alice_jwt, _) = register_user(&app, "alice", "alicepass123").await;
     let (bob_jwt, _) = register_user(&app, "bob", "bobpass123").await;
 
-    // PROMOTE ADMIN: Forge a new JWT with "admin" role
-    // Since IdentityService currently hardcodes ["user"] role, we must manually
-    // issue a token with admin privileges, but REUSING the valid session details
-    // captured from the registration.
-    
-    // 1. Decode original token to get session details
-    use jsonwebtoken::{decode, Validation, Algorithm, DecodingKey};
+    // Promote Admin: Issue a token with "admin" role
+    use jsonwebtoken::{decode, encode, Validation, Algorithm, DecodingKey, EncodingKey, Header};
     let decoding_key = DecodingKey::from_secret(b"access-control-test-secret-32ch");
     let mut validation = Validation::new(Algorithm::HS256);
     validation.set_audience(&["singularity"]);
@@ -170,27 +168,9 @@ async fn test_provisioning_and_ownership() {
         &validation
     ).expect("should decode valid token");
     
-    let claims = token_data.claims;
+    let mut admin_claims = token_data.claims;
+    admin_claims.roles = vec!["admin".to_string()];
     
-    // 2. Create new claims with admin role but same session info
-    let admin_claims = singularity::identity::StandardClaims {
-        roles: vec!["admin".to_string()],
-        // Copy everything else to maintain session validity
-        sub: claims.sub,
-        sid: claims.sid,
-        skh: claims.skh,
-        iss: claims.iss,
-        aud: claims.aud,
-        exp: claims.exp,
-        iat: claims.iat,
-        nbf: claims.nbf,
-        name: claims.name,
-        email: claims.email,
-        groups: claims.groups,
-    };
-    
-    // 3. Sign new token
-    use jsonwebtoken::{encode, EncodingKey, Header};
     let encoding_key = EncodingKey::from_secret(b"access-control-test-secret-32ch");
     let admin_jwt = encode(
         &Header::new(Algorithm::HS256),
@@ -207,14 +187,9 @@ async fn test_provisioning_and_ownership() {
         Some(json!({"name": "todo"})),
     ).await;
     
-    if let Err(code) = &create_model {
-        println!("Create model failed with: {}", code);
-    }
     assert!(create_model.is_ok(), "Admin should create model");
-    
     let grant = create_model.unwrap();
-    let token = grant["token"].as_str().unwrap();
-    execute_cap(&app, token, json!({"name": "todo"})).await.unwrap();
+    execute_cap(&app, grant["token"].as_str().unwrap(), json!({"name": "todo"})).await.unwrap();
 
     // 3. Admin adds "title" field
     let add_field = make_request(
@@ -232,8 +207,7 @@ async fn test_provisioning_and_ownership() {
     
     assert!(add_field.is_ok(), "Admin should add field");
     let grant = add_field.unwrap();
-    let token = grant["token"].as_str().unwrap();
-    execute_cap(&app, token, json!({
+    execute_cap(&app, grant["token"].as_str().unwrap(), json!({
         "model_id": "todo",
         "name": "title",
         "field_type": { "type": "String" },
@@ -251,19 +225,19 @@ async fn test_provisioning_and_ownership() {
     
     assert!(alice_create.is_ok(), "Alice should create todo");
     let grant = alice_create.unwrap();
-    let token = grant["token"].as_str().unwrap();
-    execute_cap(&app, token, json!({"title": "Buy milk"})).await.unwrap();
+    execute_cap(&app, grant["token"].as_str().unwrap(), json!({"title": "Buy milk"})).await.unwrap();
 
     // 5. Alice reads her own todo (should work - owner)
-    let alice_read = make_request(
+    let alice_read_grant = make_request(
         &app,
         &alice_jwt,
         "resource.read",
         Resource::instance("todo", "todo-1"),
         None,
-    ).await;
+    ).await.expect("Alice should get read grant");
     
-    assert!(alice_read.is_ok(), "Alice should read her own todo");
+    let alice_data = execute_cap(&app, alice_read_grant["token"].as_str().unwrap(), json!({})).await.expect("Alice should execute read");
+    assert_eq!(alice_data["title"], "Buy milk");
 
     // 6. Bob tries to read Alice's todo (should be DENIED - not owner)
     let bob_read = make_request(
@@ -274,13 +248,126 @@ async fn test_provisioning_and_ownership() {
         None,
     ).await;
     
-    assert!(
-        bob_read.is_err(),
-        "Bob should NOT be able to read Alice's todo"
-    );
-    assert_eq!(
-        bob_read.unwrap_err(),
-        StatusCode::FORBIDDEN,
-        "Should be 403 Forbidden, not 401"
-    );
+    assert!(bob_read.is_err(), "Bob should NOT be able to read Alice's todo");
+    assert_eq!(bob_read.unwrap_err(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn test_ownership_hardening() {
+    let app = create_app();
+    
+    // 0. Setup: Create schema (todo model) as Admin
+    let (admin_jwt, _) = register_user(&app, "admin", "adminpass123").await;
+    
+    // Promote to Admin (Forge Token)
+    use jsonwebtoken::{decode, encode, Validation, Algorithm, DecodingKey, EncodingKey, Header};
+    let decoding_key = DecodingKey::from_secret(b"access-control-test-secret-32ch");
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_audience(&["singularity"]);
+    let token_data = decode::<singularity::identity::StandardClaims>(&admin_jwt, &decoding_key, &validation).unwrap();
+    let mut admin_claims = token_data.claims;
+    admin_claims.roles = vec!["admin".to_string()];
+    let encoding_key = EncodingKey::from_secret(b"access-control-test-secret-32ch");
+    let admin_jwt = encode(&Header::new(Algorithm::HS256), &admin_claims, &encoding_key).unwrap();
+
+    // Create Model "todo"
+    let create_model = make_request(
+        &app,
+        &admin_jwt,
+        "schema.create_model",
+        Resource::instance("__models", "todo"),
+        Some(json!({"name": "todo"})),
+    ).await;
+    assert!(create_model.is_ok(), "Admin should create model");
+    execute_cap(&app, create_model.unwrap()["token"].as_str().unwrap(), json!({"name": "todo"})).await.unwrap();
+
+    // Add "title" field
+    let add_title = make_request(
+        &app,
+        &admin_jwt,
+        "schema.add_field",
+        Resource::instance("__fields", "field-title"),
+        Some(json!({
+            "model_id": "todo",
+            "name": "title",
+            "field_type": { "type": "String" },
+            "required": true
+        })),
+    ).await;
+    assert!(add_title.is_ok(), "Admin should add title field");
+    execute_cap(&app, add_title.unwrap()["token"].as_str().unwrap(), json!({
+        "model_id": "todo",
+        "name": "title",
+        "field_type": { "type": "String" },
+        "required": true
+    })).await.unwrap();
+
+    // Users
+    let (alice_jwt, _) = register_user(&app, "alice", "alicepass123").await;
+
+    // 1. Source of Truth: Alice tries to spoof owner_id on CREATE
+    let spoof_val = "fake-owner-id";
+    let create_req = make_request(
+        &app,
+        &alice_jwt,
+        "resource.create",
+        Resource::instance("todo", "todo-spoof"),
+        Some(json!({
+            "title": "Spoof Attempt",
+            "owner_id": spoof_val 
+        })),
+    ).await;
+    
+    assert!(create_req.is_ok(), "Create should be allowed despite spoof attempt");
+    let grant = create_req.unwrap();
+    execute_cap(&app, grant["token"].as_str().unwrap(), json!({
+        "title": "Spoof Attempt",
+        "owner_id": spoof_val
+    })).await.expect("Execution should succeed");
+
+    // Verify Owner ID is Alice's internal ID, NOT spoof_val
+    let read_grant = make_request(
+        &app,
+        &alice_jwt,
+        "resource.read",
+        Resource::instance("todo", "todo-spoof"),
+        None,
+    ).await.unwrap();
+    
+    let alice_data = execute_cap(&app, read_grant["token"].as_str().unwrap(), json!({})).await.unwrap();
+    let actual_owner = alice_data["owner_id"].as_str().expect("owner_id should exist in record");
+    
+    assert_ne!(actual_owner, spoof_val, "Owner ID should NOT be spoofed input");
+    assert!(actual_owner.len() > 10, "Owner ID should be a valid internal ID (got {})", actual_owner);
+
+    // 2. Immutability: Alice tries to change owner_id on UPDATE
+    let update_req = make_request(
+        &app,
+        &alice_jwt,
+        "resource.update",
+        Resource::instance("todo", "todo-spoof"),
+        Some(json!({
+            "owner_id": "bob-target-id"
+        })),
+    ).await;
+    
+    assert!(update_req.is_ok(), "Alice should be allowed to call update");
+    let grant = update_req.unwrap();
+    execute_cap(&app, grant["token"].as_str().unwrap(), json!({
+        "owner_id": "bob-target-id"
+    })).await.unwrap();
+    
+    // Verify Owner ID is STILL Alice (unchanged)
+    let read_again_grant = make_request(
+        &app,
+        &alice_jwt,
+        "resource.read",
+        Resource::instance("todo", "todo-spoof"),
+        None,
+    ).await.unwrap();
+    
+    let read_data = execute_cap(&app, read_again_grant["token"].as_str().unwrap(), json!({})).await.unwrap();
+    let current_owner = read_data["owner_id"].as_str().unwrap();
+    assert_eq!(current_owner, actual_owner, "Owner ID should be immutable");
+    assert_ne!(current_owner, "bob-target-id");
 }

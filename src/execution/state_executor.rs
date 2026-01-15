@@ -90,8 +90,7 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
 
         match op {
             // READ operations
-            "resource.read" | "user.read" | "document.read" | 
-            "schema.list_models" => {
+            "resource.read" | "user.read" | "document.read" => {
                 // automatic owner filtering for strict mode
                 let mut exec_constraints = serde_json::Map::new();
                 if let Some(user_id) = ctx.internal_user_id() {
@@ -115,6 +114,68 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                 Ok(ExecutionResult::read(filtered))
             }
 
+            "schema.list_models" => {
+                // 1. Prepare constraints (Owner Filtering)
+                let mut exec_constraints = serde_json::Map::new();
+                if let Some(user_id) = ctx.internal_user_id() {
+                     exec_constraints.insert("owner_id".to_string(), serde_json::json!(user_id));
+                }
+                let c_val = if !exec_constraints.is_empty() {
+                    Some(serde_json::Value::Object(exec_constraints))
+                } else {
+                    None
+                };
+
+                // 2. Fetch Models
+                let models = self.state.read(
+                    target,
+                    ctx.fields(),
+                    c_val.as_ref(),
+                )?;
+
+                // 3. Fetch Ownership Metadata (Enrichment)
+                // Query __fields for any field named 'owner_id'
+                let fields_target = ExecutionTarget::new(crate::protocol::Resource::collection("__fields"));
+                let ownership_constraints = serde_json::json!({ "name": "owner_id" });
+                
+                let fields = self.state.read(
+                    &fields_target, 
+                    &crate::protocol::FieldSet::all(), 
+                    Some(&ownership_constraints)
+                ).unwrap_or(serde_json::Value::Array(vec![])); // Ignore error if __fields fail
+
+                // Build Set of owned model_ids
+                use std::collections::HashSet;
+                let mut owned_models = HashSet::new();
+                if let serde_json::Value::Array(list) = fields {
+                    for f in list {
+                        if let Some(mid) = f.get("model_id").and_then(|v| v.as_str()) {
+                            owned_models.insert(mid.to_string());
+                        }
+                    }
+                }
+
+                // 4. Enrich
+                let mut enriched = models;
+                if let serde_json::Value::Array(ref mut list) = enriched {
+                    for model in list {
+                        if let Some(obj) = model.as_object_mut() {
+                            if let Some(id) = obj.get("id").and_then(|v| v.as_str()) {
+                                if owned_models.contains(id) {
+                                    obj.insert("ownership".into(), serde_json::json!({
+                                        "column": "owner_id",
+                                        "principal": "__internal_users"
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let filtered = ctx.filter_output(enriched);
+                Ok(ExecutionResult::read(filtered))
+            }
+
             // CREATE operations
             "resource.create" | "user.create" | "document.create" | 
             "schema.create_model" | "schema.add_field" => {
@@ -123,17 +184,27 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                     reason: "create requires payload".to_string(),
                 })?;
 
-                // Inject owner_id if authenticated and missing
-                if let Some(owner) = ctx.internal_user_id() {
-                    if let Some(obj) = payload.as_object_mut() {
-                        if !obj.contains_key("owner_id") {
-                            obj.insert("owner_id".into(), serde_json::json!(owner));
-                        }
+                // 2. Validate write fields BEFORE system injection
+                // This ensures clients only write what they are authorized to, 
+                // while the system manages the metadata.
+                ctx.validate_write_fields(&payload)?;
+
+                // 3. System Managed Injection (Source of Truth)
+                if let Some(obj) = payload.as_object_mut() {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64;
+                    
+                    // Always set timestamps
+                    obj.insert("created_at".into(), serde_json::json!(now));
+                    obj.insert("updated_at".into(), serde_json::json!(now));
+
+                    // Enforcement: Always overwrite owner_id if we have a subject
+                    if let Some(owner) = ctx.internal_user_id() {
+                        obj.insert("owner_id".into(), serde_json::json!(owner));
                     }
                 }
-
-                // 2. Validate write fields BEFORE state
-                ctx.validate_write_fields(&payload)?;
 
                 // Delegate to state
                 let count = self.state.write(
@@ -143,15 +214,21 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                     constraints.as_ref(),
                 )?;
 
+
                 Ok(ExecutionResult::write(count))
             }
 
             // UPDATE operations
             "resource.update" | "user.update" | "document.update" => {
-                let payload = payload.ok_or_else(|| ExecutionError::ConstraintViolation {
+                let mut payload = payload.ok_or_else(|| ExecutionError::ConstraintViolation {
                     constraint: "payload".to_string(),
                     reason: "update requires payload".to_string(),
                 })?;
+
+                // Immutability: Remove owner_id from payload if present
+                if let Some(obj) = payload.as_object_mut() {
+                     obj.remove("owner_id");
+                }
 
                 // 2. Validate write fields BEFORE state
                 ctx.validate_write_fields(&payload)?;
