@@ -34,6 +34,11 @@ impl ExecutionContext {
         Self { capability }
     }
 
+    /// Get the underlying verified capability.
+    pub fn capability(&self) -> &VerifiedCapability {
+        &self.capability
+    }
+
     /// Get the capability ID.
     pub fn cap_id(&self) -> &str {
         self.capability.cap_id()

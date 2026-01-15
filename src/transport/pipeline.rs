@@ -14,6 +14,11 @@ use crate::state::State;
 use crate::planner;
 use crate::executor as pap_executor;
 use crate::protocol::data::{QueryInput, InsertInput, UpdateInput, DeleteInput, DataAction};
+use crate::policy::plan_authorizer::{PlanAuthorizer, PlanAuthContext, ModelPolicyConfig};
+
+// ============================================================================
+// Internal Authorization Types (NOT EXPOSED)
+// ============================================================================
 
 
 // ============================================================================
@@ -117,7 +122,7 @@ pub fn process_request(
     let subject = subject.with_internal_id(internal_id);
 
     // Branch: Data Ops (PAP) vs Resource Ops (Legacy/Simple)
-    if request.op.starts_with("data.") {
+    if request.op.as_str().starts_with("data.") {
         return process_data_request(app, subject, request, now);
     }
 
@@ -218,23 +223,46 @@ fn process_data_request(
 
     // 1. Plan
     // We only support Query and Count for now properly
+    // Passing &*app.sqlite_state() which yields &SqliteState (impl SchemaView)
     let (plan, _action) = match request.op.as_str() {
         DATA_QUERY => {
             let input: QueryInput = serde_json::from_value(input_value)
                 .map_err(|e| TransportError::BadRequest(format!("invalid query input: {}", e)))?;
-            (planner::plan_query(model_name, &input, app.sqlite_state().as_ref())
+            (planner::plan_query(model_name, &input, &*app.sqlite_state())
                 .map_err(|e| TransportError::BadRequest(e.to_string()))?, DataAction::Query)
         },
         DATA_COUNT => {
             let input: QueryInput = serde_json::from_value(input_value)
                 .map_err(|e| TransportError::BadRequest(format!("invalid query input: {}", e)))?;
-            (planner::plan_count(model_name, &input, app.sqlite_state().as_ref())
+            (planner::plan_count(model_name, &input, &*app.sqlite_state())
                 .map_err(|e| TransportError::BadRequest(e.to_string()))?, DataAction::Count)
         },
         DATA_INSERT => {
-             let input: InsertInput = serde_json::from_value(input_value)
+             let mut input: InsertInput = serde_json::from_value(input_value)
                 .map_err(|e| TransportError::BadRequest(format!("invalid insert input: {}", e)))?;
-             (planner::plan_insert(model_name, &input, app.sqlite_state().as_ref())
+             
+             // Inject system fields if missing
+             for row in &mut input.rows {
+                 if let serde_json::Value::Object(map) = row {
+                     if !map.contains_key("id") {
+                         map.insert("id".into(), serde_json::Value::String(uuid::Uuid::new_v4().to_string()));
+                     }
+                     if !map.contains_key("created_at") {
+                         map.insert("created_at".into(), serde_json::json!(now));
+                     }
+                     if !map.contains_key("updated_at") {
+                         map.insert("updated_at".into(), serde_json::json!(now));
+                     }
+                     // Map owner_id if not present check?
+                     // If subject.internal_id exists, use it.
+                     if !map.contains_key("owner_id") {
+                         if let Some(iid) = &subject.internal_id {
+                              map.insert("owner_id".into(), serde_json::Value::String(iid.clone()));
+                         }
+                     }
+                 }
+             }
+             (planner::plan_insert(model_name, &input, &*app.sqlite_state())
                 .map_err(|e| TransportError::BadRequest(e.to_string()))?, DataAction::Insert)
         },
         // TODO: Update/Delete
@@ -242,9 +270,21 @@ fn process_data_request(
     };
 
     // 2. Authorize Plan (Policy)
-    // Note: ensure PolicyEngine has authorize_plan method
-    let grant = app.policy.authorize_plan(&subject, &plan)
-        .map_err(|_| TransportError::PolicyDenied)?; 
+    // Construct PlanAuthContext
+    let auth_ctx = PlanAuthContext {
+        subject: subject.clone(),
+        now,
+        policy_config: ModelPolicyConfig {
+            owner_field: Some("owner_id".into()),
+            admin_roles: vec!["admin".into()],
+            // Default other fields
+            ..Default::default()
+        }
+    };
+    
+    let authorizer = PlanAuthorizer::new();
+    let grant = authorizer.authorize(&plan, &auth_ctx)
+        .map_err(|e| TransportError::PolicyDenied)?; 
 
     // 3. Compute Plan Hash
     let plan_hash = pap_executor::compute_plan_hash(&plan, &grant);
@@ -258,9 +298,7 @@ fn process_data_request(
         &format!("grant-{}", subject.id),
         request.op,
         request.resource,
-        FieldSet::all(), // Plan handles field masking already? Or logic needed?
-        // Actually PlanGrant has field_mask. But Capability fields are usually simple list.
-        // We'll leave Capability fields as All and let PlanExecutor enforce field_mask from Grant.
+        FieldSet::all(), 
         now,
         now + 60, 
     )

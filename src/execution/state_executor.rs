@@ -623,6 +623,53 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                 }
             }
 
+            DATA_INSERT => {
+                let payload = payload.ok_or(ExecutionError::BadRequest("Missing insert input".into()))?;
+                let mut input: InsertInput = serde_json::from_value(payload)
+                    .map_err(|e| ExecutionError::BadRequest(e.to_string()))?;
+                
+                // Inject system fields (ID, timestamps, owner)
+                // Note: We generate fresh IDs here. 
+                // This assumes plan hashing ignores literals (or allows this).
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                for row in &mut input.rows {
+                     if let serde_json::Value::Object(map) = row {
+                         if !map.contains_key("id") {
+                             map.insert("id".into(), serde_json::Value::String(uuid::Uuid::new_v4().to_string()));
+                         }
+                         if !map.contains_key("created_at") {
+                             map.insert("created_at".into(), serde_json::json!(now));
+                         }
+                         if !map.contains_key("updated_at") {
+                             map.insert("updated_at".into(), serde_json::json!(now));
+                         }
+                         if !map.contains_key("owner_id") {
+                             // Use verified internal ID
+                             if let Some(iid) = ctx.internal_user_id() {
+                                  map.insert("owner_id".into(), serde_json::Value::String(iid.to_string()));
+                             }
+                         }
+                     }
+                }
+
+                let model_name = &target.resource.resource_type;
+                
+                let plan = planner::plan_insert(model_name, &input, self.state)
+                    .map_err(|e| ExecutionError::BadRequest(e.to_string()))?;
+
+                let constraints_val = ctx.capability().payload().constraints.as_ref()
+                    .ok_or(ExecutionError::BadRequest("Capacity missing grant constraints".into()))?;
+                let grant: PlanGrant = serde_json::from_value(constraints_val.clone())
+                    .map_err(|e| ExecutionError::BadRequest(format!("Invalid grant in token: {}", e)))?;
+                
+                let expected_hash = ctx.capability().payload().plan_hash.as_deref();
+                pap_executor::verify_plan_hash(expected_hash, &plan, &grant) 
+                     .map_err(|e| ExecutionError::ConstraintViolation { constraint: "plan_hash".into(), reason: e.to_string() })?;
+
+                 self.state.execute_plan(&plan, &grant, ctx.internal_user_id())
+                     .map_err(ExecutionError::from)
+            }
+
             DATA_QUERY | DATA_COUNT => {
                 let payload = payload.ok_or(ExecutionError::BadRequest("Missing query input".into()))?;
                 let input: QueryInput = serde_json::from_value(payload)

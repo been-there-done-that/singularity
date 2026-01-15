@@ -1861,6 +1861,8 @@ impl State for SqliteState {
             []
         ).map_err(|e| StateError::InternalError(e.to_string()))?;
 
+        Ok(())
+
     }
 
     fn execute_plan(
@@ -1877,6 +1879,32 @@ impl State for SqliteState {
             &conn,
             subject_id,
         ).map_err(|e| StateError::InternalError(e.to_string()))
+         .map(|res| {
+             use crate::executor::result::ExecutionResult as PapResult;
+             use crate::execution::ExecutionResult as AppResult;
+             
+             match res {
+                 PapResult::Rows(rows) => {
+                     let json_rows: Vec<serde_json::Value> = rows.into_iter()
+                        .map(|r| serde_json::Value::Object(r.columns.into_iter().collect()))
+                        .collect();
+                     AppResult::read(serde_json::Value::Array(json_rows))
+                 },
+                 PapResult::Count(n) => {
+                     AppResult::read(serde_json::json!({ "count": n }))
+                 },
+                 PapResult::Affected { rows, returning } => {
+                     if returning.is_empty() {
+                         AppResult::write(rows)
+                     } else {
+                        let json_rows: Vec<serde_json::Value> = returning.into_iter()
+                            .map(|r| serde_json::Value::Object(r.columns.into_iter().collect()))
+                            .collect();
+                        AppResult::read(serde_json::Value::Array(json_rows))
+                     }
+                 }
+             }
+         })
     }
 
 
@@ -1894,16 +1922,21 @@ impl State for SqliteState {
             return Ok(None);
         }
 
-        let table_name = quote_identifier(resource_type);
-        // 2. Query owner_id
-        let owner: Option<String> = conn.query_row(
-            &format!("SELECT owner_id FROM {} WHERE id = ?1", table_name),
-            params![resource_id],
-            |row| row.get(0),
-        ).optional().map_err(|e| StateError::InternalError(e.to_string()))?;
+        // 2. Query the actual table
+        // Use quote_identifier to prevent injection since resource_type is variable
+        let table = quote_identifier(resource_type);
+        let sql = format!("SELECT owner_id FROM {} WHERE id = ?1", table);
         
+        let owner: Option<String> = conn.query_row(
+            &sql,
+            params![resource_id],
+            |row| row.get(0)
+        ).optional().map_err(|e| StateError::InternalError(e.to_string()))?
+         .flatten();
+
         Ok(owner)
     }
+
 
     fn get_schema_version(&self) -> Result<Option<u64>, StateError> {
         let conn = self.conn.lock().unwrap();
@@ -1929,6 +1962,71 @@ impl State for SqliteState {
 
     fn capabilities(&self) -> &StateCapabilities {
         &self.capabilities
+    }
+}
+
+use crate::planner::{SchemaView, ModelRef, FieldRef, FieldType, RelationRef};
+
+impl SchemaView for SqliteState {
+    fn get_model(&self, name: &str) -> Option<ModelRef> {
+        let conn = self.conn.lock().unwrap();
+        // Query __models
+        let mut stmt = conn.prepare("SELECT id, name FROM __models WHERE name = ?1").ok()?;
+        let model = stmt.query_row(params![name], |row| {
+             let _id: String = row.get(0)?; // Assuming ID matches name or we map it
+             let name: String = row.get(1)?;
+             Ok(ModelRef::new(&name, &name)) 
+        }).optional().ok().flatten();
+        model
+    }
+    
+    fn get_field(&self, model: &ModelRef, field_name: &str) -> Option<FieldRef> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("
+            SELECT f.name, f.field_type 
+            FROM __fields f
+            JOIN __models m ON f.model_id = m.id
+            WHERE m.name = ?1 AND f.name = ?2
+        ").ok()?;
+        
+        stmt.query_row(params![model.name, field_name], |row| {
+            let name: String = row.get(0)?;
+            let type_str: String = row.get(1)?;
+            let json: serde_json::Value = serde_json::from_str(&type_str).unwrap_or(serde_json::Value::Null);
+            let f_type = FieldType::from_schema_json(&json); 
+            
+            Ok(FieldRef::new(model.clone(), &name, f_type))
+        }).optional().ok().flatten()
+    }
+    
+    fn get_model_fields(&self, model: &ModelRef) -> Vec<FieldRef> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = match conn.prepare("
+            SELECT f.name, f.field_type 
+            FROM __fields f
+            JOIN __models m ON f.model_id = m.id
+            WHERE m.name = ?1
+        ") {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        
+        let rows = stmt.query_map(params![model.name], |row| {
+             let name: String = row.get(0)?;
+             let type_str: String = row.get(1)?;
+             let json: serde_json::Value = serde_json::from_str(&type_str).unwrap_or(serde_json::Value::Null);
+             let f_type = FieldType::from_schema_json(&json);
+             Ok(FieldRef::new(model.clone(), &name, f_type))
+        });
+        
+        match rows {
+            Ok(iter) => iter.filter_map(Result::ok).collect(),
+            Err(_) => vec![],
+        }
+    }
+    
+    fn get_relation(&self, _name: &str) -> Option<RelationRef> {
+        None // Operations on relations not supported in V0
     }
 }
 
