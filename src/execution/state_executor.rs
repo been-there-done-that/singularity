@@ -270,9 +270,38 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
             // DELETE operations
             "resource.delete" | "user.delete" | "document.delete" |
             "schema.drop_field" => {
+                // 1. Extract constraints from payload (if provided)
+                let mut exec_constraints = serde_json::Map::new();
+                if let Some(user_id) = ctx.internal_user_id() {
+                     exec_constraints.insert("owner_id".to_string(), serde_json::json!(user_id));
+                }
+                if let Some(p) = payload {
+                    if let Some(obj) = p.as_object() {
+                        for (k, v) in obj {
+                            exec_constraints.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                let c_val = if !exec_constraints.is_empty() {
+                    Some(serde_json::Value::Object(exec_constraints.clone()))
+                } else {
+                    None
+                };
+
+                // 2. Handle special case: schema.drop_field requires ID construction
+                let mut target = target.clone();
+                if op == "schema.drop_field" && target.resource.resource_id.is_none() {
+                    let p = c_val.as_ref().ok_or(ExecutionError::BadRequest("drop_field requires payload".into()))?;
+                    let model_id = p.get("model_id").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("missing model_id".into()))?;
+                    let name = p.get("name").and_then(|v| v.as_str()).ok_or(ExecutionError::BadRequest("missing name".into()))?;
+                    
+                    let field_id = format!("{}-{}", model_id, name);
+                    target.resource.resource_id = Some(field_id);
+                }
+
                 let count = self.state.delete(
-                    target,
-                    constraints.as_ref(),
+                    &target,
+                    c_val.as_ref(),
                 )?;
 
                 Ok(ExecutionResult::write(count))

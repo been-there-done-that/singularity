@@ -141,6 +141,9 @@
 					model_id: model.id,
 					name: fieldName
 				}
+			}, {
+				model_id: model.id,
+				name: fieldName
 			});
 
 			await loadModel();

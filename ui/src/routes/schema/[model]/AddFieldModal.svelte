@@ -51,18 +51,20 @@
 				else parsedDefault = defaultValue;
 			}
 
+			const input = {
+				model_id: modelId,
+				name: name.trim(),
+				field_type: { type },
+				required,
+				unique,
+				default: parsedDefault
+			};
+
 			await executeWithCapability({
 				op: 'schema.add_field',
 				resource: { resource_type: '__fields', resource_id: null },
-				input: {
-					model_id: modelId,
-					name: name.trim(),
-					field_type: { type },
-					required,
-					unique,
-					default: parsedDefault
-				}
-			});
+				input
+			}, input);
 
 			open = false;
 			onSuccess?.();

@@ -159,6 +159,67 @@ impl SqliteState {
         Ok(())
     }
 
+    /// Map rusqlite errors to StateError, detecting constraint violations.
+    /// 
+    /// SQLite error codes for constraint violations:
+    /// - SQLITE_CONSTRAINT (19) with extended codes like SQLITE_CONSTRAINT_UNIQUE (2067)
+    fn map_sqlite_error(e: rusqlite::Error, payload: Option<&Value>) -> StateError {
+        // Check for constraint violations in the error message
+        let msg = e.to_string();
+        
+        if msg.contains("UNIQUE constraint failed") {
+            // Extract the constraint info: "UNIQUE constraint failed: table.col1, table.col2"
+            let constraint_info = msg
+                .strip_prefix("UNIQUE constraint failed: ")
+                .unwrap_or(&msg);
+
+            let reason = match (constraint_info, payload) {
+                ("__models.namespace, __models.name", Some(p)) => {
+                    let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let ns = p.get("namespace").and_then(|v| v.as_str()).unwrap_or("public");
+                    format!("Model '{}' already exists in namespace '{}'", name, ns)
+                }
+                ("__fields.model_id, __fields.name", Some(p)) => {
+                    let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    format!("Field '{}' already exists in this model", name)
+                }
+                _ => format!("A record with this value already exists ({})", constraint_info),
+            };
+            
+            return StateError::ConstraintViolation {
+                constraint: "unique".to_string(),
+                reason,
+            };
+        }
+        
+        if msg.contains("FOREIGN KEY constraint failed") {
+            return StateError::ConstraintViolation {
+                constraint: "foreign_key".to_string(),
+                reason: "Referenced record does not exist".to_string(),
+            };
+        }
+        
+        if msg.contains("NOT NULL constraint failed") {
+            let constraint_info = msg
+                .strip_prefix("NOT NULL constraint failed: ")
+                .unwrap_or(&msg);
+            return StateError::ConstraintViolation {
+                constraint: "not_null".to_string(),
+                reason: format!("Required field cannot be null ({})", constraint_info),
+            };
+        }
+        
+        if msg.contains("CHECK constraint failed") {
+            return StateError::ConstraintViolation {
+                constraint: "check".to_string(),
+                reason: "Data validation failed".to_string(),
+            };
+        }
+        
+        // Default to internal error for other cases
+        StateError::InternalError(msg)
+    }
+
     /// Build state key from target.
     fn state_key(target: &ExecutionTarget) -> (String, Option<String>) {
         (
@@ -503,7 +564,7 @@ impl SqliteState {
                     "INSERT INTO __models (id, name, namespace, created_at, owner_id) VALUES (?1, ?2, ?3, ?4, ?5)
                      ON CONFLICT(id) DO UPDATE SET name=excluded.name, namespace=excluded.namespace, owner_id=excluded.owner_id",
                     params![id, name, namespace, created_at, owner_id],
-                ).map_err(|e| StateError::InternalError(e.to_string()))?;
+                ).map_err(|e| Self::map_sqlite_error(e, Some(&data)))?;
                 
                 // Create physical table
                 // Drop lock before calling helper helper (it acquires lock itself)
@@ -591,7 +652,7 @@ impl SqliteState {
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                      ON CONFLICT(id) DO UPDATE SET name=excluded.name, required=excluded.required, unique_flag=excluded.unique_flag, default_val=excluded.default_val",
                     params![id, model_id, name, f_type, required, unique, default_val, created_at],
-                ).map_err(|e| StateError::InternalError(e.to_string()))?;
+                ).map_err(|e| Self::map_sqlite_error(e, Some(&data)))?;
 
                 // Add col to physical table
                 drop(conn);
@@ -1723,6 +1784,53 @@ mod tests {
 
         // Now has user
         assert!(state.has_any_internal_user().unwrap());
+    }
+
+    // ========================================================================
+    // Constraint Violation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_duplicate_model_returns_constraint_violation() {
+        let state = create_state();
+        
+        // Create the __models table (simulate migration)
+        state.with_connection(|conn| {
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS __models (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    owner_id TEXT,
+                    UNIQUE(namespace, name)
+                )",
+                [],
+            ).unwrap();
+        });
+        
+        // Create first model - should succeed
+        let result = state.write_internal("__models", "model-1", json!({
+            "name": "posts",
+            "namespace": "public",
+            "created_at": 1000
+        }));
+        assert!(result.is_ok());
+
+        // Try to create duplicate model with same namespace+name - should fail with ConstraintViolation
+        let result = state.write_internal("__models", "model-2", json!({
+            "name": "posts",
+            "namespace": "public",
+            "created_at": 1001
+        }));
+        
+        match result {
+            Err(StateError::ConstraintViolation { ref constraint, ref reason }) => {
+                assert_eq!(constraint, "unique");
+                assert_eq!(reason, "Model 'posts' already exists in namespace 'public'");
+            }
+            _ => panic!("Expected ConstraintViolation with specific reason, got: {:?}", result),
+        }
     }
 }
 

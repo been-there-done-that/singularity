@@ -63,10 +63,12 @@ export async function withCapability<T>(
  */
 export async function executeWithCapability<T>(
     req: OpRequestInput,
-    payload: unknown = {}
+    payload?: unknown
 ): Promise<T> {
+    // Use provided payload, or fall back to req.input for convenience
+    const effectivePayload = payload ?? req.input ?? {};
     return withCapability(req, async (token) => {
-        return execute<T>(token, payload);
+        return execute<T>(token, effectivePayload);
     });
 }
 
