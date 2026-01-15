@@ -19,6 +19,7 @@ impl MigrationManager {
                 Box::new(internal::V2Ownership),
                 Box::new(internal::V3Auth),
                 Box::new(internal::V4IndexOwnership),
+                Box::new(internal::V5Rls),
             ],
         }
     }

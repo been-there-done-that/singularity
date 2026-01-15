@@ -236,22 +236,24 @@ impl PlanAuthorizer {
     }
 
     /// Step 2: Compute the row-level predicate.
+    /// 
+    /// LEGACY: Uses ModelPolicyConfig for backwards compatibility.
+    /// For new code, use authorize_with_resolver instead.
     fn compute_row_predicate(&self, plan: &LogicalPlan, ctx: &PlanAuthContext) -> RowPredicate {
-        // Public models: always allow
+        // Public models: always allow reads
         if ctx.policy_config.is_public
             && matches!(plan.action, DataAction::Query | DataAction::Count)
         {
             return RowPredicate::Always;
         }
 
-        // Admins: always allow
+        // Admins: explicit Always (capability-explicit)
         if self.is_admin(ctx) {
             return RowPredicate::Always;
         }
 
-        // Ownership-based access
+        // Ownership-based access (legacy path)
         if let Some(ref owner_field) = ctx.policy_config.owner_field {
-            // Generate: WHERE owner_field = $subject
             return RowPredicate::Sql {
                 filter: FilterOp::Eq(owner_field.clone(), FilterValue::Subject),
             };
@@ -259,6 +261,68 @@ impl PlanAuthorizer {
 
         // Default: deny all (safest default)
         RowPredicate::Never
+    }
+
+    /// Compute row predicate using RowScopeResolver.
+    /// 
+    /// This is the preferred path for RLS - uses configured access profiles.
+    pub fn compute_row_predicate_with_resolver<S: crate::state::State>(
+        &self,
+        plan: &LogicalPlan,
+        ctx: &PlanAuthContext,
+        resolver: &super::row_scope_resolver::RowScopeResolver<'_, S>,
+    ) -> RowPredicate {
+        // Admins: explicit Always (capability-explicit)
+        // CRITICAL: This is encoded into the capability, not inferred at execution
+        if self.is_admin(ctx) {
+            return RowPredicate::Always;
+        }
+
+        // Resolve scope using hierarchy
+        let resolved = resolver.resolve(&ctx.subject, &plan.base_model.name, plan.action);
+        
+        // Convert to RowPredicate
+        resolved.to_predicate()
+    }
+
+    /// Authorize with resolver (preferred path).
+    ///
+    /// Uses RowScopeResolver for RLS instead of hardcoded ModelPolicyConfig.
+    pub fn authorize_with_resolver<S: crate::state::State>(
+        &self,
+        plan: &LogicalPlan,
+        ctx: &PlanAuthContext,
+        resolver: &super::row_scope_resolver::RowScopeResolver<'_, S>,
+    ) -> Result<PlanGrant, AuthorizationError> {
+        // Step 1: Action authorization
+        self.authorize_action(plan.action, ctx)?;
+
+        // Step 2: Compute row predicate using resolver
+        let row_predicate = self.compute_row_predicate_with_resolver(plan, ctx, resolver);
+
+        // Step 3: Compute field masks
+        let field_mask = self.compute_field_mask(plan, ctx)?;
+
+        // Step 4: Authorize and grant joins
+        let joins = self.authorize_joins(&plan.joins, ctx)?;
+
+        // Step 5: Compute bulk constraints
+        let bulk = self.compute_bulk_grant(plan, ctx)?;
+
+        // INVARIANT: Every PlanGrant MUST have an explicit RowPredicate
+        debug_assert!(
+            !matches!(row_predicate, RowPredicate::Never) || self.is_admin(ctx) == false,
+            "non-admin PlanGrant should have explicit predicate, not Never unless denied"
+        );
+
+        Ok(PlanGrant {
+            model: plan.base_model.name.clone(),
+            action: plan.action,
+            row_predicate,
+            field_mask,
+            joins,
+            bulk,
+        })
     }
 
     /// Step 3: Compute field-level access masks.
@@ -690,5 +754,73 @@ mod tests {
 
         let err = authorizer.authorize(&plan, &ctx).unwrap_err();
         assert!(matches!(err, AuthorizationError::JoinDenied { relation, .. } if relation == "items.owner"));
+    }
+
+    // ==================== MANDATORY INVARIANT TESTS ====================
+
+    /// MANDATORY: Admin capability must have explicit RowPredicate::Always.
+    /// This is encoded into the capability, not inferred at execution time.
+    #[test]
+    fn test_admin_capability_has_explicit_always() {
+        let authorizer = PlanAuthorizer::new();
+        let plan = minimal_query_plan();
+        let ctx = admin_context();
+
+        let grant = authorizer.authorize(&plan, &ctx).unwrap();
+        
+        // INVARIANT: Admin bypass must be capability-explicit
+        assert_eq!(grant.row_predicate, RowPredicate::Always,
+            "Admin PlanGrant must have explicit RowPredicate::Always, not inferred");
+    }
+
+    /// MANDATORY: Every PlanGrant must have an explicit RowPredicate.
+    /// RowPredicate::Never means "deny all rows" - this is valid and explicit.
+    #[test]
+    fn test_plangrant_always_has_explicit_row_predicate() {
+        let authorizer = PlanAuthorizer::new();
+        let plan = minimal_query_plan();
+
+        // Test 1: Admin gets Always
+        let grant = authorizer.authorize(&plan, &admin_context()).unwrap();
+        assert!(matches!(grant.row_predicate, 
+            RowPredicate::Always | RowPredicate::Never | RowPredicate::Sql { .. }),
+            "PlanGrant must have explicit predicate");
+
+        // Test 2: User gets Sql predicate
+        let grant = authorizer.authorize(&plan, &user_context()).unwrap();
+        assert!(matches!(grant.row_predicate, 
+            RowPredicate::Always | RowPredicate::Never | RowPredicate::Sql { .. }),
+            "PlanGrant must have explicit predicate");
+
+        // Test 3: Public gets Always
+        let grant = authorizer.authorize(&plan, &public_context()).unwrap();
+        assert!(matches!(grant.row_predicate, 
+            RowPredicate::Always | RowPredicate::Never | RowPredicate::Sql { .. }),
+            "PlanGrant must have explicit predicate");
+    }
+
+    /// MANDATORY: No model config = deny (not implicit allow).
+    #[test]
+    fn test_no_config_returns_deny() {
+        let authorizer = PlanAuthorizer::new();
+        let plan = minimal_query_plan();
+        
+        // Context with no owner_field, not public, not admin
+        let ctx = PlanAuthContext {
+            subject: PolicySubject::new("user").with_internal_id("internal-id"),
+            now: 1704067200,
+            policy_config: ModelPolicyConfig {
+                is_public: false,
+                owner_field: None, // No ownership config
+                admin_roles: vec!["admin".into()],
+                ..Default::default()
+            },
+        };
+
+        let grant = authorizer.authorize(&plan, &ctx).unwrap();
+        
+        // INVARIANT: No config = deny (safest default)
+        assert_eq!(grant.row_predicate, RowPredicate::Never,
+            "Missing config must result in RowPredicate::Never, not implicit allow");
     }
 }

@@ -37,6 +37,7 @@ mod context;
 mod engine;
 mod error;
 pub mod plan_authorizer;
+pub mod row_scope_resolver;
 mod sandbox;
 
 pub use context::{PolicyContext, PolicyEnv, PolicySubject};
@@ -48,5 +49,7 @@ pub use error::PolicyError;
 pub use plan_authorizer::{
     AuthorizationError, ModelPolicyConfig, PlanAuthContext, PlanAuthorizer,
 };
+pub use row_scope_resolver::{ResolvedScope, RowScopeResolver};
 pub use sandbox::{create_sandboxed_engine, validate_policy};
+
 
