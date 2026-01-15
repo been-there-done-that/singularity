@@ -7,8 +7,10 @@
 	 */
 
 	import { page } from '$app/state';
+	import { goto } from '$app/navigation';
 	import { Button, DangerZone, EmptyState } from '$lib/ui';
 	import { executeWithCapability, KernelRequestError } from '$lib/kernel';
+	import AddFieldModal from './AddFieldModal.svelte';
 
 	const modelName = $derived(page.params.model ?? '');
 
@@ -34,6 +36,7 @@
 
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let isAddOpen = $state(false);
 
 	$effect(() => {
 		if (modelName) {
@@ -105,6 +108,51 @@
 			loading = false;
 		}
 	}
+
+	async function handleDeleteModel() {
+		if (!model) return;
+
+		try {
+			await executeWithCapability({
+				op: 'resource.delete',
+				resource: { resource_type: '__models', resource_id: model.id },
+				input: {}
+			});
+
+			// Navigate back to list on success
+			goto('/schema');
+		} catch (e) {
+			if (e instanceof KernelRequestError) {
+				error = e.message;
+			} else {
+				error = e instanceof Error ? e.message : 'Failed to delete model';
+			}
+		}
+	}
+
+	async function handleDeleteField(fieldName: string) {
+		if (!model || !confirm(`Are you sure you want to delete field "${fieldName}"? This action cannot be undone.`)) return;
+
+		try {
+			await executeWithCapability({
+				op: 'schema.drop_field',
+				resource: { resource_type: '__fields', resource_id: null },
+				input: {
+					model_id: model.id,
+					name: fieldName
+				}
+			});
+
+			await loadModel();
+		} catch (e) {
+			console.error('Failed to delete field:', e);
+			if (e instanceof KernelRequestError) {
+				error = e.message;
+			} else {
+				error = e instanceof Error ? e.message : 'Failed to delete field';
+			}
+		}
+	}
 </script>
 
 <div class="max-w-4xl mx-auto">
@@ -171,8 +219,9 @@
 
 		<!-- Fields Table -->
 		<div class="bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden mb-8">
-			<div class="px-6 py-4 border-b border-zinc-800">
+			<div class="px-6 py-4 border-b border-zinc-800 flex items-center justify-between">
 				<h2 class="text-lg font-semibold text-white">Fields</h2>
+				<Button size="sm" onclick={() => isAddOpen = true}>+ Add Field</Button>
 			</div>
 
 			{#if model.fields.length === 0}
@@ -193,6 +242,7 @@
 								<th class="px-6 py-3 text-left text-xs font-medium text-zinc-400 uppercase">Required</th>
 								<th class="px-6 py-3 text-left text-xs font-medium text-zinc-400 uppercase">Unique</th>
 								<th class="px-6 py-3 text-left text-xs font-medium text-zinc-400 uppercase">Default</th>
+								<th class="px-6 py-3 text-right text-xs font-medium text-zinc-400 uppercase">Actions</th>
 							</tr>
 						</thead>
 						<tbody class="divide-y divide-zinc-800">
@@ -236,6 +286,19 @@
 											<span class="text-zinc-600">—</span>
 										{/if}
 									</td>
+									<td class="px-6 py-4 text-right">
+										{#if !field.isSystem}
+											<button 
+												onclick={() => handleDeleteField(field.name)}
+												class="text-zinc-500 hover:text-red-400 transition-colors"
+												title="Delete field"
+											>
+												<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+													<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+												</svg>
+											</button>
+										{/if}
+									</td>
 								</tr>
 							{/each}
 						</tbody>
@@ -244,15 +307,17 @@
 			{/if}
 		</div>
 
-		<!-- Danger Zone (read-only for now) -->
-		<div class="opacity-50 pointer-events-none">
+		<!-- Danger Zone -->
+		<div class="mt-8">
 			<DangerZone
 				title="Drop Model"
 				description="Permanently delete this model and all its data. This cannot be undone."
 				confirmText="Delete Model"
-				onconfirm={() => console.log('Delete model')}
+				onconfirm={handleDeleteModel}
 			/>
 		</div>
+
+		<AddFieldModal bind:open={isAddOpen} modelId={model.id} onSuccess={loadModel} />
 	{:else}
 		<EmptyState 
 			title="Model not found" 
