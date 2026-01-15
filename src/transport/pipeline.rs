@@ -126,6 +126,11 @@ pub fn process_request(
         return process_data_request(app, subject, request, now);
     }
 
+    // Branch: Access Profile Ops (Admin-only, Direct Execution)
+    if request.op.as_str().starts_with("access.") {
+        return process_access_admin_request(app, subject, request, now);
+    }
+
     // --- Legacy Resource Pipeline ---
 
     // 3. Ownership Loading
@@ -377,6 +382,102 @@ pub fn process_execute(
     ).map_err(TransportError::Execution)?;
 
     Ok(result)
+}
+
+/// Process access profile admin requests (direct execution, no capability).
+///
+/// This is control-plane, not data-plane. No capability minting.
+fn process_access_admin_request(
+    app: &AppState,
+    subject: crate::policy::PolicySubject,
+    request: OpRequest,
+    now: u64,
+) -> Result<CapGrant, TransportError> {
+    use crate::protocol::opcode::*;
+    use crate::protocol::data::{
+        AccessProfileInput, AccessProfileUpdate, AccessProfileListOutput, AccessProfileOutput,
+    };
+
+    // Admin-only gate
+    if !subject.roles.iter().any(|r| r == "admin") {
+        return Err(TransportError::PolicyDenied);
+    }
+
+    let input_value = request.input.clone().unwrap_or(serde_json::Value::Null);
+
+    // Direct execution based on opcode
+    let result: serde_json::Value = match request.op.as_str() {
+        ACCESS_CREATE_PROFILE => {
+            let input: AccessProfileInput = serde_json::from_value(input_value)
+                .map_err(|e| TransportError::BadRequest(format!("invalid input: {}", e)))?;
+            
+            input.validate()
+                .map_err(|e| TransportError::BadRequest(e.to_string()))?;
+            
+            // Apply safe defaults (auto-insert Deny for allowed ops without scope)
+            let input = input.with_safe_defaults();
+            
+            let profile_id = app.state.create_access_profile(&input, now)
+                .map_err(|e| TransportError::Internal(e.to_string()))?;
+            
+            serde_json::json!({ "id": profile_id, "created": true })
+        }
+        ACCESS_LIST_PROFILES => {
+            let model_id = input_value.get("model_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            
+            let profiles = app.state.list_access_profiles(model_id)
+                .map_err(|e| TransportError::Internal(e.to_string()))?;
+            
+            serde_json::to_value(AccessProfileListOutput {
+                total: profiles.len(),
+                profiles,
+            }).map_err(|e| TransportError::Internal(e.to_string()))?
+        }
+        ACCESS_GET_PROFILE => {
+            let profile_id = input_value.get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| TransportError::BadRequest("id required".into()))?;
+            
+            let profile = app.state.get_access_profile(profile_id)
+                .map_err(|e| TransportError::Internal(e.to_string()))?
+                .ok_or_else(|| TransportError::State(crate::state::StateError::NotFound {
+                    resource_type: "access_profile".into(),
+                    resource_id: profile_id.into(),
+                }))?;
+            
+            serde_json::to_value(profile)
+                .map_err(|e| TransportError::Internal(e.to_string()))?
+        }
+        ACCESS_UPDATE_PROFILE => {
+            let profile_id = input_value.get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| TransportError::BadRequest("id required".into()))?;
+            
+            let updates: AccessProfileUpdate = serde_json::from_value(input_value.clone())
+                .map_err(|e| TransportError::BadRequest(format!("invalid update: {}", e)))?;
+            
+            app.state.update_access_profile(profile_id, &updates, now)
+                .map_err(|e| TransportError::Internal(e.to_string()))?;
+            
+            serde_json::json!({ "id": profile_id, "updated": true })
+        }
+        ACCESS_DELETE_PROFILE => {
+            let profile_id = input_value.get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| TransportError::BadRequest("id required".into()))?;
+            
+            app.state.delete_access_profile(profile_id)
+                .map_err(|e| TransportError::Internal(e.to_string()))?;
+            
+            serde_json::json!({ "id": profile_id, "deleted": true })
+        }
+        _ => return Err(TransportError::BadRequest(format!("unsupported access op: {}", request.op))),
+    };
+
+    // Return direct result (no capability minting)
+    Ok(CapGrant::direct_result(request.request_id, result))
 }
 
 #[cfg(test)]

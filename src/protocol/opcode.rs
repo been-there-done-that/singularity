@@ -157,6 +157,18 @@ pub const DATA_UPDATE: &str = "data.update";
 /// Delete with WHERE filter
 pub const DATA_DELETE: &str = "data.delete";
 
+// Access Profile Opcodes (Admin Only, Direct Execution)
+/// Create an access profile for a model
+pub const ACCESS_CREATE_PROFILE: &str = "access.create_profile";
+/// List access profiles for a model
+pub const ACCESS_LIST_PROFILES: &str = "access.list_profiles";
+/// Get a specific access profile
+pub const ACCESS_GET_PROFILE: &str = "access.get_profile";
+/// Update an access profile (includes scope updates)
+pub const ACCESS_UPDATE_PROFILE: &str = "access.update_profile";
+/// Delete an access profile
+pub const ACCESS_DELETE_PROFILE: &str = "access.delete_profile";
+
 #[cfg(test)]
 mod tests {
     use super::*;
