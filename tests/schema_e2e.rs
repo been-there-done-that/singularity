@@ -81,9 +81,9 @@ fn test_schema_persistence_flow() {
     if let singularity::execution::ExecutionResult::Read { data } = result {
         assert_eq!(data["name"], "test_model");
         let fields = data["fields"].as_array().expect("fields should be array");
-        assert_eq!(fields.len(), 1);
-        assert_eq!(fields[0]["name"], "title");
-        assert_eq!(fields[0]["required"], true);
+        assert_eq!(fields.len(), 5);
+        let title_field = fields.iter().find(|f| f["name"] == "title").expect("title field should exist");
+        assert_eq!(title_field["required"], true);
     } else {
         panic!("expected read result");
     }
@@ -103,7 +103,7 @@ fn test_schema_persistence_flow() {
     if let singularity::execution::ExecutionResult::Read { data } = result_after {
         assert_eq!(data["name"], "test_model");
         let fields = data["fields"].as_array().expect("fields should be array");
-        assert_eq!(fields.len(), 0);
+        assert_eq!(fields.len(), 4);
     }
 
     // 6. Verify Physical Table Storage (STRICT mode)
@@ -230,4 +230,44 @@ fn test_schema_introspection_access_control() {
     let ctx_a_read = create_context_with_user(read_op, Resource::instance("__models", model_id), user_a);
     let result_a_read = executor.execute(&ctx_a_read, &target_read, &meta, None);
     assert!(result_a_read.is_ok(), "User A should read model_a");
+}
+
+#[test]
+fn test_schema_introspection_enrichment() {
+    let (state, _) = setup();
+    let executor = StateBackedExecutor::new(&state);
+    let meta = ExecutionMeta::new();
+    let user_a = "user-a-enrich";
+
+    // 1. Create Model
+    let model_id = "m_enrich";
+    let ctx = create_context_with_user("schema.create_model", Resource::instance("__models", model_id), user_a);
+    let target = ExecutionTarget::new(Resource::instance("__models", model_id));
+    
+    // Payload uses implicit owner injection (Source of Truth hardening verified implicitly)
+    let payload = json!({
+        "name": "enrich_model",
+        "namespace": "public",
+        "created_at": 200
+    });
+    executor.execute(&ctx, &target, &meta, Some(payload)).expect("create model failed");
+
+    // 2. List Models (Introspection)
+    // op must be "schema.list_models" to trigger enrichment logic
+    let ctx_list = create_context_with_user("schema.list_models", Resource::collection("__models"), user_a);
+    let target_list = ExecutionTarget::new(Resource::collection("__models"));
+
+    let result = executor.execute(&ctx_list, &target_list, &meta, None).expect("list failed");
+
+    if let singularity::execution::ExecutionResult::Read { data } = result {
+        let list = data.as_array().expect("result array");
+        let model = list.iter().find(|m| m["id"] == model_id).expect("model found");
+        
+        // 3. Verify Ownership Metadata
+        let ownership = model.get("ownership").expect("ownership metadata present");
+        assert_eq!(ownership["column"], "owner_id");
+        assert_eq!(ownership["principal"], "__internal_users");
+    } else {
+        panic!("expected read result");
+    }
 }
