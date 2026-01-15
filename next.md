@@ -9,3 +9,15 @@ Help you design folder + schema interaction
 Review the policy edge cases before UI
 help you expose this cleanly to frontend SDKs
 Audit log UI
+
+Session introspection API
+list active sessions
+revoke specific device
+Rate-limit session creation
+prevent login abuse
+Audit trail
+session created / revoked events
+access_control_e2e refactor
+now trivial with single AppState
+Unify auth + object.presign verification paths
+same enforcement model, shared traits
