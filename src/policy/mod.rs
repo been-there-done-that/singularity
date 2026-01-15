@@ -24,10 +24,19 @@
 //! ```
 //!
 //! Policy = judgment. Capability = authority.
+//!
+//! # Plan Authorization (Phase C)
+//!
+//! ```text
+//! PlanAuthorizer::authorize(subject, plan, ctx) -> PlanGrant
+//! ```
+//!
+//! Transforms LogicalPlan + Subject into enforcement artifacts.
 
 mod context;
 mod engine;
 mod error;
+mod plan_authorizer;
 mod sandbox;
 
 pub use context::{PolicyContext, PolicyEnv, PolicySubject};
@@ -36,4 +45,8 @@ pub use engine::{
     SubjectSnapshot,
 };
 pub use error::PolicyError;
+pub use plan_authorizer::{
+    AuthorizationError, ModelPolicyConfig, PlanAuthContext, PlanAuthorizer,
+};
 pub use sandbox::{create_sandboxed_engine, validate_policy};
+
