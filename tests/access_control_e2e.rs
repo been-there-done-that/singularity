@@ -19,11 +19,19 @@ async fn register_user(
     app: &axum::Router,
     username: &str,
     password: &str,
+    bootstrap_code: Option<&str>,
 ) -> (String, String) {
-    let register_body = json!({
-        "username": username,
-        "password": password
-    });
+    let register_body = match bootstrap_code {
+        Some(code) => json!({
+            "username": username,
+            "password": password,
+            "bootstrap_code": code
+        }),
+        None => json!({
+            "username": username,
+            "password": password
+        }),
+    };
 
     let register_req = Request::builder()
         .uri("/auth/register")
@@ -119,7 +127,7 @@ async fn execute_cap(
     Ok(serde_json::from_slice(&bytes).unwrap())
 }
 
-fn create_app() -> axum::Router {
+fn create_app() -> (axum::Router, String) {
     let jwt_secret = b"access-control-test-secret-32ch";
     let identity = Arc::new(JwtVerifier::with_hmac_secret(
         "https://singularity.local",
@@ -144,17 +152,19 @@ fn create_app() -> axum::Router {
         jwt_secret.to_vec(),
     );
 
-    app(app_state)
+    let bootstrap_code = app_state.get_bootstrap_code_for_test().unwrap();
+
+    (app(app_state), bootstrap_code)
 }
 
 #[tokio::test]
 async fn test_provisioning_and_ownership() {
-    let app = create_app();
+    let (app, bootstrap_code) = create_app();
 
-    // 1. Register users: admin, alice, bob
-    let (admin_jwt, _) = register_user(&app, "admin", "adminpass123").await;
-    let (alice_jwt, _) = register_user(&app, "alice", "alicepass123").await;
-    let (bob_jwt, _) = register_user(&app, "bob", "bobpass123").await;
+    // 1. Register users: admin (with bootstrap code), alice, bob
+    let (admin_jwt, _) = register_user(&app, "admin", "adminpass123", Some(&bootstrap_code)).await;
+    let (alice_jwt, _) = register_user(&app, "alice", "alicepass123", None).await;
+    let (bob_jwt, _) = register_user(&app, "bob", "bobpass123", None).await;
 
     // Promote Admin: Issue a token with "admin" role
     use jsonwebtoken::{decode, encode, Validation, Algorithm, DecodingKey, EncodingKey, Header};
@@ -254,10 +264,10 @@ async fn test_provisioning_and_ownership() {
 
 #[tokio::test]
 async fn test_ownership_hardening() {
-    let app = create_app();
+    let (app, bootstrap_code) = create_app();
     
     // 0. Setup: Create schema (todo model) as Admin
-    let (admin_jwt, _) = register_user(&app, "admin", "adminpass123").await;
+    let (admin_jwt, _) = register_user(&app, "admin", "adminpass123", Some(&bootstrap_code)).await;
     
     // Promote to Admin (Forge Token)
     use jsonwebtoken::{decode, encode, Validation, Algorithm, DecodingKey, EncodingKey, Header};
@@ -303,7 +313,7 @@ async fn test_ownership_hardening() {
     })).await.unwrap();
 
     // Users
-    let (alice_jwt, _) = register_user(&app, "alice", "alicepass123").await;
+    let (alice_jwt, _) = register_user(&app, "alice", "alicepass123", None).await;
 
     // 1. Source of Truth: Alice tries to spoof owner_id on CREATE
     let spoof_val = "fake-owner-id";
