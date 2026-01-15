@@ -94,15 +94,20 @@
         
         try {
             // 1. Count (parallel-ish)
+            const countInput = {
+                select: [], // count doesn't select fields
+                where: query.where,
+                joins: query.joins,
+                order_by: [],
+                limit: null,
+                offset: null
+            };
+
             const countReq = requestCapability({
                 op: 'data.count',
                 resource: { resource_type: model, resource_id: null },
-                input: {
-                    select: [], // count doesn't select fields
-                    where: query.where,
-                    joins: query.joins
-                }
-            }).then(grant => execute<number>(grant.token, {}));
+                input: countInput
+            }).then(grant => execute<{count: number}>(grant.token, countInput));
 
             // 2. Query
             const queryReq = requestCapability({
@@ -110,23 +115,14 @@
                 resource: { resource_type: model, resource_id: null },
                 input: query
             }).then(async grant => {
-                 // In v0 we might want to capture headers for FAST/SLOW mode if exposed
-                 // But execute() just returns body. 
-                 // We might need to adjust pipeline.ts to return metadata if we want the mode.
-                 // For now assume mode is in result or we mock it.
-                 // Actually execute() returns T.
-                 // Let's assume executeWithMode extension or just T for now.
-                 return execute<Row[]>(grant.token, {});
+                 return execute<Row[]>(grant.token, query);
             });
 
-            const [countResult, queryResult] = await Promise.all([countReq, queryReq]);
+            const [countObj, queryResult] = await Promise.all([countReq, queryReq]);
             
             rows = queryResult;
-            totalCount = countResult;
+            totalCount = countObj.count;
             
-            // Determine mode (mock for now until pipeline supports metadata)
-            // Or maybe query returns { rows: [], mode: ... } ? No pipeline says generic T.
-            // If the kernel returns headers, we need pipeline support.
             executionMode = 'FAST'; // Placeholder
             
         } catch (e: any) {
@@ -138,6 +134,7 @@
             loading = false;
         }
     }
+
 </script>
 
 <div class="h-screen flex flex-col bg-black text-zinc-300 font-sans overflow-hidden">

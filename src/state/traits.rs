@@ -14,8 +14,11 @@
 //! - Security review
 //! - All conformance tests updated
 
-use crate::execution::ExecutionTarget;
+use crate::execution::{ExecutionTarget, ExecutionResult};
 use crate::protocol::FieldSet;
+use crate::planner::{LogicalPlan, SchemaView};
+use crate::protocol::data::PlanGrant;
+
 
 use super::capabilities::StateCapabilities;
 use super::error::StateError;
@@ -38,7 +41,7 @@ use super::error::StateError;
 /// - `write()`: Create or update resource (unified, execution decides semantics)
 /// - `delete()`: Remove resource(s) matching target + constraints
 /// - `capabilities()`: Get backend capabilities
-pub trait State: Send + Sync {
+pub trait State: SchemaView + Send + Sync {
     /// Read resource(s) matching target and constraints.
     ///
     /// # Arguments
@@ -154,6 +157,17 @@ pub trait State: Send + Sync {
     ///
     /// Used for schema evolution. Backends should support this atomically.
     fn rename_column(&self, table: &str, old_col: &str, new_col: &str) -> Result<(), StateError>;
+
+    /// Execute a logical plan using the backend's native execution engine.
+    ///
+    /// This enables the PAP pipeline (Plan-Auth-Plan execution).
+    fn execute_plan(
+        &self,
+        plan: &LogicalPlan,
+        grant: &PlanGrant,
+        subject_id: Option<&str>,
+    ) -> Result<ExecutionResult, StateError>;
+
 }
 
 #[cfg(test)]
