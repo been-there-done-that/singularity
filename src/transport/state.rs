@@ -106,8 +106,8 @@ impl AppState {
         let identity_service = IdentityService::new(jwt_issuer);
 
         // Determine bootstrap state
-        let has_users = state.has_any_internal_user().unwrap_or(false);
-        let bootstrap = if has_users {
+        let has_admin = state.has_admin_user().unwrap_or(false);
+        let bootstrap = if has_admin {
             BootstrapState::completed()
         } else {
             let bs = BootstrapState::new_with_code();
