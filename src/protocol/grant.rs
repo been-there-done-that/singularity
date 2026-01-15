@@ -171,15 +171,22 @@ impl From<&str> for CapabilityToken {
 
 /// Wire-format response to `OpRequest`.
 ///
-/// Contains the opaque signed token and metadata for the client.
+/// Contains either:
+/// - A signed capability token (for data-plane ops)
+/// - A direct result (for control-plane ops like access.*, schema.*)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CapGrant {
     /// Correlates to the originating `OpRequest`.
     pub request_id: String,
-    /// Opaque signed capability token.
-    pub token: CapabilityToken,
-    /// Expiration timestamp (convenience field, also encoded in token).
-    pub expires_at: u64,
+    /// Opaque signed capability token (None for direct results).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<CapabilityToken>,
+    /// Expiration timestamp (None for direct results).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    /// Direct result (for control-plane ops, no capability needed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
 }
 
 impl CapGrant {
@@ -191,9 +198,30 @@ impl CapGrant {
     ) -> Self {
         Self {
             request_id: request_id.into(),
-            token,
-            expires_at,
+            token: Some(token),
+            expires_at: Some(expires_at),
+            result: None,
         }
+    }
+
+    /// Create a direct result response (no capability, no execute phase).
+    ///
+    /// Used for control-plane operations like access.* and schema.*.
+    pub fn direct_result(
+        request_id: impl Into<String>,
+        result: serde_json::Value,
+    ) -> Self {
+        Self {
+            request_id: request_id.into(),
+            token: None,
+            expires_at: None,
+            result: Some(result),
+        }
+    }
+
+    /// Check if this is a direct result (no capability).
+    pub fn is_direct_result(&self) -> bool {
+        self.result.is_some()
     }
 }
 
@@ -308,8 +336,8 @@ mod tests {
         );
 
         assert_eq!(grant.request_id, "req-001");
-        assert_eq!(grant.token.as_str(), "signed-token-data");
-        assert_eq!(grant.expires_at, 1704067260);
+        assert_eq!(grant.token.as_ref().unwrap().as_str(), "signed-token-data");
+        assert_eq!(grant.expires_at, Some(1704067260));
     }
 
     #[test]
