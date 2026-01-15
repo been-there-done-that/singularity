@@ -119,13 +119,23 @@ pub async fn handle_register(
 
         // Valid bootstrap code: create admin
         let roles = vec!["admin".to_string()];
-        let response = state.identity_service()
-            .register_with_roles(state.sqlite_state(), req, roles)?;
+        let response = match state.identity_service()
+            .register_with_roles(state.sqlite_state(), req.clone(), roles)
+        {
+            Ok(res) => res,
+            Err(AuthError::UsernameExists) => {
+                // Recovery: User exists but might not be admin.
+                // Try to promote the existing user to admin.
+                tracing::info!(username = %req.username, "User exists during bootstrap, attempting promotion to admin");
+                state.identity_service().promote_to_admin(state.sqlite_state(), req)?
+            }
+            Err(e) => return Err(e),
+        };
 
         // CRITICAL: Complete bootstrap (clears code permanently)
         state.complete_bootstrap();
 
-        tracing::info!("Bootstrap complete: first admin registered");
+        tracing::info!("Bootstrap complete: first admin registered/elevated");
         Ok(Json(response.into()))
     } else {
         // Normal registration: user role

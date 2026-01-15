@@ -359,6 +359,42 @@ impl IdentityService {
         self.create_session_and_jwt(state, &auth_user_id, email, req.device_name, vec!["user".to_string()])
     }
 
+    /// Promote an existing user to admin.
+    /// 
+    /// Used by bootstrap flow to recover from failed registration where
+    /// the user was created but admin role was not assigned.
+    pub fn promote_to_admin(&self, state: &SqliteState, req: RegisterRequest) -> Result<AuthResponse, AuthError> {
+        // 1. Find user by username
+        let user: Result<(String, Option<String>), AuthError> = state.with_connection(|conn| {
+            conn.query_row(
+                "SELECT id, email FROM __auth_users WHERE username = ?1 LIMIT 1",
+                params![&req.username],
+                |row| Ok((row.get(0)?, row.get(1)?))
+            ).map_err(|_| AuthError::UserNotFound)
+        });
+
+        let (auth_user_id, email) = user?;
+
+        // 2. Get password hash
+        let stored_hash: Result<String, AuthError> = state.with_connection(|conn| {
+            conn.query_row(
+                "SELECT password_hash FROM __auth_secrets WHERE user_id = ?1 LIMIT 1",
+                params![&auth_user_id],
+                |row| row.get(0)
+            ).map_err(|_| AuthError::InvalidCredentials)
+        });
+
+        let stored_hash = stored_hash?;
+
+        // 3. Verify password (must be correct to promote)
+        if !verify_password(&req.password, &stored_hash)? {
+            return Err(AuthError::InvalidCredentials);
+        }
+
+        // 4. Create session and issue JWT with admin role
+        self.create_session_and_jwt(state, &auth_user_id, email, req.device_name, vec!["admin".to_string()])
+    }
+
     /// Revoke a session (logout).
     pub fn logout(&self, state: &SqliteState, session_id: &str) -> Result<(), AuthError> {
         let now = std::time::SystemTime::now()
