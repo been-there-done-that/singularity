@@ -5,6 +5,16 @@
  * See: src/protocol/request.rs, src/protocol/grant.rs, src/protocol/execute.rs
  */
 
+export type SystemStatus = 'ok' | 'bootstrapping' | 'degraded';
+
+export interface HealthResponse {
+    status: SystemStatus;
+    checks: {
+        db: string;
+        bootstrap: string;
+    };
+}
+
 // Resource identifier for capability scoping
 export interface Resource {
     resource_type: string;
