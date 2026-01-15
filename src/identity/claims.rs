@@ -18,6 +18,14 @@ pub struct StandardClaims {
     /// Subject identifier (required).
     pub sub: String,
 
+    /// Session ID (for revocation).
+    #[serde(default)]
+    pub sid: Option<String>,
+
+    /// Session key hash (proof of possession).
+    #[serde(default)]
+    pub skh: Option<String>,
+
     /// User roles (optional, defaults to empty).
     #[serde(default)]
     pub roles: Vec<String>,
@@ -78,8 +86,25 @@ impl StandardClaims {
         if let Some(name) = self.name {
             subject = subject.with_claim("name", serde_json::json!(name));
         }
+        // Add session claims for verification
+        if let Some(sid) = self.sid {
+            subject = subject.with_claim("sid", serde_json::json!(sid));
+        }
+        if let Some(skh) = self.skh {
+            subject = subject.with_claim("skh", serde_json::json!(skh));
+        }
 
         subject
+    }
+
+    /// Get session ID if present.
+    pub fn session_id(&self) -> Option<&str> {
+        self.sid.as_deref()
+    }
+
+    /// Get session key hash if present.
+    pub fn session_key_hash(&self) -> Option<&str> {
+        self.skh.as_deref()
     }
 }
 
@@ -112,6 +137,8 @@ mod tests {
     fn test_claims_to_policy_subject() {
         let claims = StandardClaims {
             sub: "user-123".to_string(),
+            sid: Some("session-1".to_string()),
+            skh: Some("hash-1".to_string()),
             roles: vec!["admin".to_string()],
             groups: vec!["engineering".to_string()],
             email: Some("user@example.com".to_string()),
@@ -137,6 +164,8 @@ mod tests {
     fn test_claims_missing_roles_ok() {
         let claims = StandardClaims {
             sub: "user-456".to_string(),
+            sid: None,
+            skh: None,
             roles: vec![],
             groups: vec![],
             email: None,

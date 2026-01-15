@@ -54,6 +54,7 @@ async fn test_http_transport_flow() {
         signer,
         state,
         sys_policy.to_string(),
+        jwt_secret.to_vec(),
     );
 
     // Build Router
@@ -65,6 +66,8 @@ async fn test_http_transport_flow() {
     
     let claims = StandardClaims {
         sub: "user-http".to_string(),
+        sid: Some("session-http".to_string()),
+        skh: Some("hash-http".to_string()),
         roles: vec!["admin".to_string()],
         groups: vec![],
         email: None,

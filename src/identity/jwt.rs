@@ -202,6 +202,8 @@ mod tests {
 
         let claims = StandardClaims {
             sub: "user-123".to_string(),
+            sid: Some("session-1".to_string()),
+            skh: Some("hash-1".to_string()),
             roles: vec!["admin".to_string()],
             groups: vec![],
             email: Some("user@example.com".to_string()),
@@ -235,6 +237,8 @@ mod tests {
 
         let claims = StandardClaims {
             sub: "user-123".to_string(),
+            sid: None,
+            skh: None,
             roles: vec![],
             groups: vec![],
             email: None,
@@ -267,6 +271,8 @@ mod tests {
 
         let claims = StandardClaims {
             sub: "user-123".to_string(),
+            sid: None,
+            skh: None,
             roles: vec![],
             groups: vec![],
             email: None,
@@ -297,6 +303,8 @@ mod tests {
 
         let claims = StandardClaims {
             sub: "user-123".to_string(),
+            sid: None,
+            skh: None,
             roles: vec![],
             groups: vec![],
             email: None,

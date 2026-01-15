@@ -4,6 +4,7 @@
 //!
 //! - POST /auth/login - authenticate user
 //! - POST /auth/register - create new user
+//! - POST /auth/logout - revoke session
 
 use axum::{
     extract::State,
@@ -11,7 +12,7 @@ use axum::{
     Json,
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::identity::provider::{
     AuthError, AuthResponse as ServiceAuthResponse, LoginRequest, RegisterRequest,
@@ -23,6 +24,7 @@ use crate::transport::AppState;
 pub struct AuthResponse {
     pub token: String,
     pub user_id: String,
+    pub session_id: String,
     pub expires_in: u64,
 }
 
@@ -31,9 +33,16 @@ impl From<ServiceAuthResponse> for AuthResponse {
         Self {
             token: r.token,
             user_id: r.user_id,
+            session_id: r.session_id,
             expires_in: r.expires_in,
         }
     }
+}
+
+/// Logout request.
+#[derive(Debug, Deserialize)]
+pub struct LogoutRequest {
+    pub session_id: String,
 }
 
 /// HTTP Error response.
@@ -50,6 +59,8 @@ impl IntoResponse for AuthError {
             AuthError::InvalidCredentials => (StatusCode::UNAUTHORIZED, "INVALID_CREDENTIALS"),
             AuthError::UsernameExists => (StatusCode::CONFLICT, "USERNAME_EXISTS"),
             AuthError::EmailExists => (StatusCode::CONFLICT, "EMAIL_EXISTS"),
+            AuthError::SessionRevoked => (StatusCode::UNAUTHORIZED, "SESSION_REVOKED"),
+            AuthError::SessionNotFound => (StatusCode::NOT_FOUND, "SESSION_NOT_FOUND"),
             AuthError::Password(_) => (StatusCode::INTERNAL_SERVER_ERROR, "PASSWORD_ERROR"),
             AuthError::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, "STORAGE_ERROR"),
             AuthError::Jwt(_) => (StatusCode::INTERNAL_SERVER_ERROR, "JWT_ERROR"),
@@ -80,4 +91,13 @@ pub async fn handle_register(
 ) -> Result<Json<AuthResponse>, AuthError> {
     let response = state.identity_service().register(state.sqlite_state(), req)?;
     Ok(Json(response.into()))
+}
+
+/// POST /auth/logout
+pub async fn handle_logout(
+    State(state): State<AppState>,
+    Json(req): Json<LogoutRequest>,
+) -> Result<StatusCode, AuthError> {
+    state.identity_service().logout(state.sqlite_state(), &req.session_id)?;
+    Ok(StatusCode::NO_CONTENT)
 }
