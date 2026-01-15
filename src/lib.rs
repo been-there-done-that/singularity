@@ -28,9 +28,11 @@ pub mod capability;
 pub mod execution;
 pub mod identity;
 pub mod migration;
+pub mod planner;
 pub mod policy;
 pub mod protocol;
 pub mod schema;
 pub mod state;
 pub mod object;
 pub mod transport;
+
