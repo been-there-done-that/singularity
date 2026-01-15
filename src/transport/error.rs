@@ -10,6 +10,7 @@ use thiserror::Error;
 
 use crate::execution::ExecutionError;
 use crate::identity::IdentityError;
+use crate::identity::provider::AuthError;
 use crate::state::StateError;
 
 /// Errors that can occur at the transport layer.
@@ -18,6 +19,10 @@ pub enum TransportError {
     /// Identity verification failed (401).
     #[error("unauthorized: {0}")]
     Unauthorized(#[from] IdentityError),
+
+    /// Session invalid (revoked, not found, key mismatch) (401).
+    #[error("session invalid: {0}")]
+    SessionInvalid(#[from] AuthError),
 
     /// Policy denied the operation (403).
     #[error("policy denied operation")]
@@ -48,6 +53,7 @@ impl IntoResponse for TransportError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
             TransportError::Unauthorized(e) => (StatusCode::UNAUTHORIZED, e.to_string()),
+            TransportError::SessionInvalid(e) => (StatusCode::UNAUTHORIZED, e.to_string()),
             TransportError::PolicyDenied => (StatusCode::FORBIDDEN, "policy denied".to_string()),
             TransportError::InvalidCapability(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             TransportError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),

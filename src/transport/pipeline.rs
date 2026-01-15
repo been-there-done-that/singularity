@@ -15,19 +15,32 @@ use crate::state::State;
 /// Core logic for `Request` operation.
 ///
 /// Pipeline:
-/// 1. Identity Verification
-/// 2. Policy Evaluation
-/// 3. Capability Minting
+/// 1. Identity Verification (JWT)
+/// 2. Session Verification (skh check, revocation check)
+/// 3. Policy Evaluation
+/// 4. Capability Minting
 pub fn process_request(
     app: &AppState,
     identity_token: &str,
     request: OpRequest,
     now: u64,
 ) -> Result<CapGrant, TransportError> {
-    // 1. Identity Verification
+    // 1. Identity Verification (JWT signature + claims)
     let subject = app.identity.verify(identity_token, now)?;
 
-    // 2. User Provisioning
+    // 2. Session Verification (skh matches DB, not revoked)
+    // Extract session claims from subject
+    let sid = subject.claims.get("sid")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| TransportError::BadRequest("missing session id in token".into()))?;
+    let skh = subject.claims.get("skh")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| TransportError::BadRequest("missing session key hash in token".into()))?;
+    
+    // Verify session against database
+    app.identity_service().verify_session(app.sqlite_state(), sid, skh)?;
+
+    // 3. User Provisioning
     let internal_id = app.state.ensure_internal_user(&subject.id, &subject.roles)
         .map_err(|e| TransportError::Internal(format!("provisioning failed: {}", e)))?;
 
