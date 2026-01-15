@@ -147,6 +147,19 @@ pub enum DataAction {
     Delete,
 }
 
+impl std::fmt::Display for DataAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Query => write!(f, "query"),
+            Self::Count => write!(f, "count"),
+            Self::Insert => write!(f, "insert"),
+            Self::Update => write!(f, "update"),
+            Self::Delete => write!(f, "delete"),
+        }
+    }
+}
+
+
 impl RowPredicate {
     /// Create an ownership predicate (most common case).
     ///
