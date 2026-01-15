@@ -1105,6 +1105,34 @@ impl SqliteState {
             _ => Err(StateError::BadRequest(format!("cannot delete from internal table {}", resource_type))),
         }
     }
+
+    /// Helper: Load row scopes for an access profile.
+    fn load_row_scopes_for_profile(
+        &self,
+        conn: &rusqlite::Connection,
+        profile_id: &str,
+    ) -> Result<std::collections::HashMap<String, crate::protocol::data::RowScopeType>, StateError> {
+        use crate::protocol::data::RowScopeType;
+        
+        let mut stmt = conn.prepare(
+            "SELECT opcode, scope_type FROM __row_scopes WHERE access_profile_id = ?1"
+        ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        let rows = stmt.query_map(params![profile_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+            ))
+        }).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        let mut scopes = std::collections::HashMap::new();
+        for row in rows {
+            let (opcode, scope_str) = row.map_err(|e| StateError::InternalError(e.to_string()))?;
+            scopes.insert(opcode, RowScopeType::from_db_str(&scope_str));
+        }
+
+        Ok(scopes)
+    }
 }
 
 impl State for SqliteState {
@@ -1962,6 +1990,296 @@ impl State for SqliteState {
 
     fn capabilities(&self) -> &StateCapabilities {
         &self.capabilities
+    }
+
+    // =========================================================================
+    // Access Profile CRUD Implementation
+    // =========================================================================
+
+    fn create_access_profile(
+        &self,
+        input: &crate::protocol::data::AccessProfileInput,
+        now: u64,
+    ) -> Result<String, StateError> {
+        use crate::protocol::data::PrincipalType;
+        
+        let conn = self.conn.lock().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let principal_type = input.principal_type.as_str();
+
+        // Check for duplicate
+        let exists: bool = conn.query_row(
+            "SELECT 1 FROM __access_profiles 
+             WHERE model_id = ?1 AND principal_type = ?2 AND principal_id = ?3",
+            params![input.model_id, principal_type, input.principal_id],
+            |_| Ok(true),
+        ).unwrap_or(false);
+
+        if exists {
+            return Err(StateError::ConstraintViolation {
+                constraint: "unique_profile".into(),
+                reason: format!(
+                    "Profile already exists for ({}, {}, {})",
+                    input.model_id, principal_type, input.principal_id
+                ),
+            });
+        }
+
+        // Insert profile
+        conn.execute(
+            "INSERT INTO __access_profiles 
+             (id, model_id, principal_type, principal_id, allow_query, allow_insert, 
+              allow_update, allow_delete, priority, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+            params![
+                id,
+                input.model_id,
+                principal_type,
+                input.principal_id,
+                input.allow_query as i32,
+                input.allow_insert as i32,
+                input.allow_update as i32,
+                input.allow_delete as i32,
+                input.priority as i64,
+                now as i64,
+            ],
+        ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        // Insert row scopes
+        for (opcode, scope) in &input.row_scopes {
+            let scope_str = scope.to_db_str();
+            conn.execute(
+                "INSERT INTO __row_scopes (id, access_profile_id, opcode, scope_type, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    id,
+                    opcode,
+                    scope_str,
+                    now as i64,
+                ],
+            ).map_err(|e| StateError::InternalError(e.to_string()))?;
+        }
+
+        Ok(id)
+    }
+
+    fn list_access_profiles(
+        &self,
+        model_id: &str,
+    ) -> Result<Vec<crate::protocol::data::AccessProfileOutput>, StateError> {
+        use crate::protocol::data::{AccessProfileOutput, PrincipalType, RowScopeType};
+        use std::collections::HashMap;
+
+        let conn = self.conn.lock().unwrap();
+        
+        let mut stmt = conn.prepare(
+            "SELECT id, model_id, principal_type, principal_id, 
+                    allow_query, allow_insert, allow_update, allow_delete, 
+                    priority, created_at, updated_at
+             FROM __access_profiles 
+             WHERE model_id = ?1 OR ?1 = ''
+             ORDER BY priority DESC"
+        ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        let rows = stmt.query_map(params![model_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,  // id
+                row.get::<_, String>(1)?,  // model_id
+                row.get::<_, String>(2)?,  // principal_type
+                row.get::<_, String>(3)?,  // principal_id
+                row.get::<_, i32>(4)? != 0,  // allow_query
+                row.get::<_, i32>(5)? != 0,  // allow_insert
+                row.get::<_, i32>(6)? != 0,  // allow_update
+                row.get::<_, i32>(7)? != 0,  // allow_delete
+                row.get::<_, i64>(8)? as u32,  // priority
+                row.get::<_, i64>(9)? as u64,  // created_at
+                row.get::<_, i64>(10)? as u64, // updated_at
+            ))
+        }).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        let mut profiles = Vec::new();
+        for row in rows {
+            let (id, mid, pt, pid, aq, ai, au, ad, prio, ca, ua) = 
+                row.map_err(|e| StateError::InternalError(e.to_string()))?;
+            
+            // Load scopes for this profile
+            let scopes = self.load_row_scopes_for_profile(&conn, &id)?;
+            
+            profiles.push(AccessProfileOutput {
+                id,
+                model_id: mid,
+                principal_type: PrincipalType::from_str(&pt).unwrap_or(PrincipalType::User),
+                principal_id: pid,
+                allow_query: aq,
+                allow_insert: ai,
+                allow_update: au,
+                allow_delete: ad,
+                priority: prio,
+                row_scopes: scopes,
+                created_at: ca,
+                updated_at: ua,
+            });
+        }
+
+        Ok(profiles)
+    }
+
+    fn get_access_profile(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::protocol::data::AccessProfileOutput>, StateError> {
+        use crate::protocol::data::{AccessProfileOutput, PrincipalType};
+
+        let conn = self.conn.lock().unwrap();
+        
+        let result = conn.query_row(
+            "SELECT id, model_id, principal_type, principal_id, 
+                    allow_query, allow_insert, allow_update, allow_delete, 
+                    priority, created_at, updated_at
+             FROM __access_profiles WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i32>(4)? != 0,
+                    row.get::<_, i32>(5)? != 0,
+                    row.get::<_, i32>(6)? != 0,
+                    row.get::<_, i32>(7)? != 0,
+                    row.get::<_, i64>(8)? as u32,
+                    row.get::<_, i64>(9)? as u64,
+                    row.get::<_, i64>(10)? as u64,
+                ))
+            }
+        ).optional().map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        match result {
+            Some((id, mid, pt, pid, aq, ai, au, ad, prio, ca, ua)) => {
+                let scopes = self.load_row_scopes_for_profile(&conn, &id)?;
+                Ok(Some(AccessProfileOutput {
+                    id,
+                    model_id: mid,
+                    principal_type: PrincipalType::from_str(&pt).unwrap_or(PrincipalType::User),
+                    principal_id: pid,
+                    allow_query: aq,
+                    allow_insert: ai,
+                    allow_update: au,
+                    allow_delete: ad,
+                    priority: prio,
+                    row_scopes: scopes,
+                    created_at: ca,
+                    updated_at: ua,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn update_access_profile(
+        &self,
+        id: &str,
+        updates: &crate::protocol::data::AccessProfileUpdate,
+        now: u64,
+    ) -> Result<(), StateError> {
+        let conn = self.conn.lock().unwrap();
+
+        // Build dynamic update
+        let mut assignments = vec!["updated_at = ?1".to_string()];
+        let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now as i64)];
+        let mut idx = 2;
+
+        if let Some(v) = updates.allow_query {
+            assignments.push(format!("allow_query = ?{}", idx));
+            values.push(Box::new(v as i32));
+            idx += 1;
+        }
+        if let Some(v) = updates.allow_insert {
+            assignments.push(format!("allow_insert = ?{}", idx));
+            values.push(Box::new(v as i32));
+            idx += 1;
+        }
+        if let Some(v) = updates.allow_update {
+            assignments.push(format!("allow_update = ?{}", idx));
+            values.push(Box::new(v as i32));
+            idx += 1;
+        }
+        if let Some(v) = updates.allow_delete {
+            assignments.push(format!("allow_delete = ?{}", idx));
+            values.push(Box::new(v as i32));
+            idx += 1;
+        }
+        if let Some(v) = updates.priority {
+            assignments.push(format!("priority = ?{}", idx));
+            values.push(Box::new(v as i64));
+            idx += 1;
+        }
+
+        values.push(Box::new(id.to_string()));
+        let sql = format!(
+            "UPDATE __access_profiles SET {} WHERE id = ?{}",
+            assignments.join(", "),
+            idx
+        );
+
+        let affected = conn.execute(&sql, rusqlite::params_from_iter(values.iter()))
+            .map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        if affected == 0 {
+            return Err(StateError::NotFound {
+                resource_type: "__access_profiles".into(),
+                resource_id: id.into(),
+            });
+        }
+
+        // Update row scopes
+        for (opcode, scope) in &updates.row_scopes {
+            let scope_str = scope.to_db_str();
+            
+            // Upsert scope
+            conn.execute(
+                "INSERT INTO __row_scopes (id, access_profile_id, opcode, scope_type, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+                 ON CONFLICT(access_profile_id, opcode) DO UPDATE SET 
+                 scope_type = excluded.scope_type, updated_at = excluded.updated_at",
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    id,
+                    opcode,
+                    scope_str,
+                    now as i64,
+                ],
+            ).map_err(|e| StateError::InternalError(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    fn delete_access_profile(&self, id: &str) -> Result<(), StateError> {
+        let conn = self.conn.lock().unwrap();
+
+        // Delete scopes first (FK cascade not set up)
+        conn.execute(
+            "DELETE FROM __row_scopes WHERE access_profile_id = ?1",
+            params![id],
+        ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        // Delete profile
+        let affected = conn.execute(
+            "DELETE FROM __access_profiles WHERE id = ?1",
+            params![id],
+        ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        if affected == 0 {
+            return Err(StateError::NotFound {
+                resource_type: "__access_profiles".into(),
+                resource_id: id.into(),
+            });
+        }
+
+        Ok(())
     }
 }
 

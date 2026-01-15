@@ -167,8 +167,8 @@ impl Singularity for GrpcServer {
             
         Ok(Response::new(CapGrantProto {
             request_id: grant.request_id,
-            token: grant.token.into_inner(),
-            expires_at: grant.expires_at,
+            token: grant.token.map(|t| t.into_inner()).unwrap_or_default(),
+            expires_at: grant.expires_at.unwrap_or(0),
         }))
     }
 
