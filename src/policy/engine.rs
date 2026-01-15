@@ -28,10 +28,86 @@
 //! This keeps policy = judgment, capability = authority.
 
 use rhai::{Dynamic, Scope};
+use serde::Serialize;
 
 use super::context::PolicyContext;
 use super::error::PolicyError;
 use super::sandbox::create_sandboxed_engine;
+
+// ============================================================================
+// Authorization Explainability Types
+// ============================================================================
+
+/// The result of a policy evaluation with full explanation.
+///
+/// This struct is for **debugging and admin introspection only**.
+/// It does NOT change the authorization contract.
+#[derive(Debug, Clone, Serialize)]
+pub struct AccessDecision {
+    /// Final decision: true = allow, false = deny
+    pub allowed: bool,
+    /// The operation that was evaluated
+    pub op: String,
+    /// Subject information used in decision
+    pub subject: SubjectSnapshot,
+    /// Ownership information
+    pub ownership: OwnershipCheck,
+    /// Policy evaluation details
+    pub policy: PolicyEvaluation,
+}
+
+/// Immutable snapshot of subject identity for explainability.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubjectSnapshot {
+    /// External subject ID
+    pub id: String,
+    /// Internal (kernel-managed) ID
+    pub internal_id: Option<String>,
+    /// Subject's roles
+    pub roles: Vec<String>,
+}
+
+/// Ownership check result for explainability.
+#[derive(Debug, Clone, Serialize)]
+pub struct OwnershipCheck {
+    /// Column used for ownership (e.g., "owner_id")
+    pub column: Option<String>,
+    /// Whether subject is resource owner
+    pub is_owner: bool,
+}
+
+/// Policy evaluation details for explainability.
+#[derive(Debug, Clone, Serialize)]
+pub struct PolicyEvaluation {
+    /// Source of the policy script
+    pub script_source: ScriptSource,
+    /// The final result of the policy
+    pub result: PolicyResult,
+}
+
+/// Source of the policy script.
+#[derive(Debug, Clone, Serialize)]
+pub enum ScriptSource {
+    /// Built-in default policy
+    Default,
+    /// Inline script content
+    Inline(String),
+}
+
+/// Result of policy evaluation.
+#[derive(Debug, Clone, Serialize)]
+pub enum PolicyResult {
+    /// Policy allows the operation
+    Allow,
+    /// Policy denies the operation
+    Deny,
+    /// Policy evaluation failed
+    Error(String),
+}
+
+// ============================================================================
+// Policy Engine
+// ============================================================================
 
 /// Policy engine for evaluating policy scripts.
 ///
@@ -93,6 +169,83 @@ impl PolicyEngine {
             Ok(result.as_bool().unwrap())
         } else {
             Err(PolicyError::NonBooleanResult(result.type_name().to_string()))
+        }
+    }
+
+    /// Evaluate a policy script and return an explained decision.
+    ///
+    /// This is for **debugging and admin introspection only**.
+    /// It does NOT change the authorization contract.
+    ///
+    /// # Arguments
+    ///
+    /// * `script` - Rhai policy script (expression returning bool), or None for default
+    /// * `ctx` - Read-only policy context
+    ///
+    /// # Returns
+    ///
+    /// An `AccessDecision` containing the decision and full explanation.
+    pub fn evaluate_with_explanation(
+        &self,
+        script: Option<&str>,
+        ctx: &PolicyContext,
+    ) -> AccessDecision {
+        // 1. Capture subject snapshot
+        let subject = SubjectSnapshot {
+            id: ctx.subject.id.clone(),
+            internal_id: ctx.subject.internal_id.clone(),
+            roles: ctx.subject.roles.clone(),
+        };
+
+        // 2. Compute ownership check
+        let is_owner = match (&ctx.resource_owner, &ctx.subject.internal_id) {
+            (Some(res_owner), Some(sub_int)) => res_owner == sub_int,
+            _ => false,
+        };
+        let ownership = OwnershipCheck {
+            column: if ctx.resource_owner.is_some() {
+                Some("owner_id".to_string())
+            } else {
+                None
+            },
+            is_owner,
+        };
+
+        // 3. Determine script source and evaluate
+        let (script_source, policy_result, allowed) = match script {
+            Some(s) => {
+                // Inline script evaluation
+                match self.evaluate(s, ctx) {
+                    Ok(true) => (ScriptSource::Inline(s.to_string()), PolicyResult::Allow, true),
+                    Ok(false) => (ScriptSource::Inline(s.to_string()), PolicyResult::Deny, false),
+                    Err(e) => (
+                        ScriptSource::Inline(s.to_string()),
+                        PolicyResult::Error(e.to_string()),
+                        false,
+                    ),
+                }
+            }
+            None => {
+                // Default policy: owner check only
+                if is_owner {
+                    (ScriptSource::Default, PolicyResult::Allow, true)
+                } else {
+                    (ScriptSource::Default, PolicyResult::Deny, false)
+                }
+            }
+        };
+
+        let policy = PolicyEvaluation {
+            script_source,
+            result: policy_result,
+        };
+
+        AccessDecision {
+            allowed,
+            op: ctx.op.as_str().to_string(),
+            subject,
+            ownership,
+            policy,
         }
     }
 
@@ -443,5 +596,113 @@ mod tests {
 
         let result = engine.evaluate("input.amount <= 1000", &ctx);
         assert_eq!(result.unwrap(), true);
+    }
+
+    // ==================== Explainability Tests ====================
+
+    #[test]
+    fn test_explain_allowed_by_owner() {
+        let engine = PolicyEngine::new();
+        let internal_id = "internal-user-1";
+
+        let subject = PolicySubject::new("ext-1").with_internal_id(internal_id);
+        let resource = Resource::instance("doc", "doc-1");
+        let env = PolicyEnv::new(0);
+        let ctx = PolicyContext::new(subject, resource, "resource.read", env)
+            .with_resource_owner(internal_id);
+
+        // Default policy (None) should allow owner
+        let decision = engine.evaluate_with_explanation(None, &ctx);
+
+        assert!(decision.allowed);
+        assert!(decision.ownership.is_owner);
+        assert_eq!(decision.ownership.column, Some("owner_id".to_string()));
+        assert!(matches!(decision.policy.result, PolicyResult::Allow));
+        assert!(matches!(decision.policy.script_source, ScriptSource::Default));
+        assert_eq!(decision.subject.id, "ext-1");
+        assert_eq!(decision.subject.internal_id, Some(internal_id.to_string()));
+    }
+
+    #[test]
+    fn test_explain_denied_no_ownership() {
+        let engine = PolicyEngine::new();
+
+        // Subject with different internal ID than resource owner
+        let subject = PolicySubject::new("ext-2").with_internal_id("other-user");
+        let resource = Resource::instance("doc", "doc-1");
+        let env = PolicyEnv::new(0);
+        let ctx = PolicyContext::new(subject, resource, "resource.read", env)
+            .with_resource_owner("internal-user-1");
+
+        // Default policy (None) should deny non-owner
+        let decision = engine.evaluate_with_explanation(None, &ctx);
+
+        assert!(!decision.allowed);
+        assert!(!decision.ownership.is_owner);
+        assert_eq!(decision.ownership.column, Some("owner_id".to_string()));
+        assert!(matches!(decision.policy.result, PolicyResult::Deny));
+    }
+
+    #[test]
+    fn test_explain_allowed_by_role() {
+        let engine = PolicyEngine::new();
+
+        // Non-owner but has admin role
+        let subject = PolicySubject::new("ext-3")
+            .with_internal_id("other-user")
+            .with_roles(["admin"]);
+        let resource = Resource::instance("doc", "doc-1");
+        let env = PolicyEnv::new(0);
+        let ctx = PolicyContext::new(subject, resource, "resource.read", env)
+            .with_resource_owner("internal-user-1");
+
+        // Policy that allows admin bypass
+        let policy = r#"owner || roles.contains("admin")"#;
+        let decision = engine.evaluate_with_explanation(Some(policy), &ctx);
+
+        assert!(decision.allowed);
+        assert!(!decision.ownership.is_owner); // Not owner
+        assert!(decision.subject.roles.contains(&"admin".to_string())); // But has admin role
+        assert!(matches!(decision.policy.result, PolicyResult::Allow));
+        assert!(matches!(decision.policy.script_source, ScriptSource::Inline(_)));
+    }
+
+    #[test]
+    fn test_explain_policy_error() {
+        let engine = PolicyEngine::new();
+
+        let subject = PolicySubject::new("user-1");
+        let resource = Resource::instance("doc", "doc-1");
+        let env = PolicyEnv::new(0);
+        let ctx = PolicyContext::new(subject, resource, "resource.read", env);
+
+        // Invalid policy that returns non-boolean
+        let decision = engine.evaluate_with_explanation(Some("42"), &ctx);
+
+        assert!(!decision.allowed);
+        assert!(matches!(decision.policy.result, PolicyResult::Error(_)));
+
+        if let PolicyResult::Error(msg) = &decision.policy.result {
+            assert!(
+                msg.contains("boolean") || msg.contains("i64"),
+                "Error should mention type issue: {}", 
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_explain_captures_operation() {
+        let engine = PolicyEngine::new();
+
+        let subject = PolicySubject::new("user-1").with_internal_id("int-1");
+        let resource = Resource::instance("document", "doc-1");
+        let env = PolicyEnv::new(0);
+        let ctx = PolicyContext::new(subject, resource, "document.update", env)
+            .with_resource_owner("int-1");
+
+        let decision = engine.evaluate_with_explanation(None, &ctx);
+
+        assert_eq!(decision.op, "document.update");
     }
 }

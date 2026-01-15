@@ -31,6 +31,9 @@ mod error;
 mod sandbox;
 
 pub use context::{PolicyContext, PolicyEnv, PolicySubject};
-pub use engine::PolicyEngine;
+pub use engine::{
+    AccessDecision, OwnershipCheck, PolicyEngine, PolicyEvaluation, PolicyResult, ScriptSource,
+    SubjectSnapshot,
+};
 pub use error::PolicyError;
 pub use sandbox::{create_sandboxed_engine, validate_policy};
