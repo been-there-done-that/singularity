@@ -205,3 +205,44 @@ pub async fn handle_logout(
     
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// GET /auth/me
+pub async fn handle_me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<AuthResponse>, AuthError> {
+    // 1. Extract token
+    let auth_header = headers.get("authorization")
+        .ok_or(AuthError::InvalidCredentials)?
+        .to_str()
+        .map_err(|_| AuthError::InvalidCredentials)?;
+    
+    if !auth_header.starts_with("Bearer ") {
+         return Err(AuthError::InvalidCredentials);
+    }
+    let token = &auth_header[7..];
+
+    // 2. Verify token
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    
+    let subject = state.identity.verify(token, now)
+        .map_err(|_| AuthError::InvalidCredentials)?; // Return 401 on any verification failure
+    
+    // 3. Verify Session (DB check)
+    let sid = subject.claims.get("sid").and_then(|v| v.as_str()).ok_or(AuthError::InvalidCredentials)?;
+    let skh = subject.claims.get("skh").and_then(|v| v.as_str()).ok_or(AuthError::InvalidCredentials)?;
+    
+    // This checks DB existence and revocation status
+    state.identity_service().verify_session(state.sqlite_state(), sid, skh)?;
+
+    // 4. Return Response (echo token)
+    let exp = subject.claims.get("exp").and_then(|v| v.as_u64()).unwrap_or(0);
+    let expires_in = if exp > now { exp - now } else { 0 };
+
+    Ok(Json(AuthResponse {
+        token: token.to_string(),
+        user_id: subject.id,
+        session_id: sid.to_string(),
+        expires_in,
+    }))
+}

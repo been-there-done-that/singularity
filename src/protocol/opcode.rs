@@ -118,6 +118,8 @@ pub const OBJECT_DELETE: &str = "object.delete";
 pub const OBJECT_LIST: &str = "object.list";
 pub const OBJECT_PRESIGN: &str = "object.presign";
 
+pub const RESOURCE_COUNT: &str = "resource.count";
+
 #[cfg(test)]
 mod tests {
     use super::*;
