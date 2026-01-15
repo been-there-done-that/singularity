@@ -5,3 +5,6 @@ export { default as DangerZone } from './DangerZone.svelte';
 export { default as EmptyState } from './EmptyState.svelte';
 export { default as Toast } from './Toast.svelte';
 export { default as Sidebar } from './Sidebar.svelte';
+
+// State singletons
+export { toast } from '../state/toast.svelte';
