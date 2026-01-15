@@ -670,6 +670,54 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                      .map_err(ExecutionError::from)
             }
 
+            DATA_UPDATE => {
+                let payload = payload.ok_or(ExecutionError::BadRequest("Missing update input".into()))?;
+                let mut input: UpdateInput = serde_json::from_value(payload)
+                    .map_err(|e| ExecutionError::BadRequest(e.to_string()))?;
+                
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                if let serde_json::Value::Object(ref mut map) = input.set {
+                     if !map.contains_key("updated_at") {
+                         map.insert("updated_at".into(), serde_json::json!(now));
+                     }
+                }
+
+                let model_name = &target.resource.resource_type;
+                let plan = planner::plan_update(model_name, &input, self.state)
+                    .map_err(|e| ExecutionError::BadRequest(e.to_string()))?;
+                
+                let constraints_val = ctx.capability().payload().constraints.as_ref()
+                    .ok_or(ExecutionError::BadRequest("Capacity missing grant constraints".into()))?;
+                let grant: PlanGrant = serde_json::from_value(constraints_val.clone())
+                    .map_err(|e| ExecutionError::BadRequest(format!("Invalid grant in token: {}", e)))?;
+                let expected_hash = ctx.capability().payload().plan_hash.as_deref();
+                pap_executor::verify_plan_hash(expected_hash, &plan, &grant) 
+                     .map_err(|e| ExecutionError::ConstraintViolation { constraint: "plan_hash".into(), reason: e.to_string() })?;
+                 
+                 self.state.execute_plan(&plan, &grant, ctx.internal_user_id())
+                     .map_err(ExecutionError::from)
+            }
+
+            DATA_DELETE => {
+                let payload = payload.ok_or(ExecutionError::BadRequest("Missing delete input".into()))?;
+                let input: DeleteInput = serde_json::from_value(payload)
+                    .map_err(|e| ExecutionError::BadRequest(e.to_string()))?;
+                let model_name = &target.resource.resource_type;
+                let plan = planner::plan_delete(model_name, &input, self.state)
+                    .map_err(|e| ExecutionError::BadRequest(e.to_string()))?;
+                
+                let constraints_val = ctx.capability().payload().constraints.as_ref()
+                    .ok_or(ExecutionError::BadRequest("Capacity missing grant constraints".into()))?;
+                let grant: PlanGrant = serde_json::from_value(constraints_val.clone())
+                    .map_err(|e| ExecutionError::BadRequest(format!("Invalid grant in token: {}", e)))?;
+                let expected_hash = ctx.capability().payload().plan_hash.as_deref();
+                pap_executor::verify_plan_hash(expected_hash, &plan, &grant) 
+                     .map_err(|e| ExecutionError::ConstraintViolation { constraint: "plan_hash".into(), reason: e.to_string() })?;
+                 
+                 self.state.execute_plan(&plan, &grant, ctx.internal_user_id())
+                     .map_err(ExecutionError::from)
+            }
+
             DATA_QUERY | DATA_COUNT => {
                 let payload = payload.ok_or(ExecutionError::BadRequest("Missing query input".into()))?;
                 let input: QueryInput = serde_json::from_value(payload)
