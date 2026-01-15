@@ -9,10 +9,12 @@
 	import { Button, EmptyState } from '$lib/ui';
 	import { auth } from '$lib/state/auth.svelte';
 	import { executeWithCapability, KernelRequestError } from '$lib/kernel';
+	import CreateModelModal from './CreateModelModal.svelte';
 
 	// Loading state
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	let isCreateOpen = $state(false);
 
 	// Models from kernel
 	let models = $state<
@@ -79,7 +81,7 @@
 			<p class="mt-2 text-zinc-400">Manage your data models</p>
 		</div>
 			{#if auth.isAdmin}
-			<Button variant="primary">+ Create Model</Button>
+			<Button variant="primary" onclick={() => (isCreateOpen = true)}>+ Create Model</Button>
 		{/if}
 	</div>
 
@@ -190,4 +192,7 @@
 			{/each}
 		</div>
 	{/if}
+
+
+	<CreateModelModal bind:open={isCreateOpen} onSuccess={loadModels} />
 </div>
