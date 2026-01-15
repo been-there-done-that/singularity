@@ -186,6 +186,13 @@ impl PolicyEngine {
         // Environment
         scope.push_constant("now", ctx.env.now as i64);
 
+        // Ownership: Explicit System Signal
+        let is_owner = match (&ctx.resource_owner, &ctx.subject.internal_id) {
+            (Some(res_owner), Some(sub_int)) => res_owner == sub_int,
+            _ => false,
+        };
+        scope.push_constant("owner", is_owner);
+
         // Input as dynamic (if present)
         if let Some(ref input) = ctx.input {
             if let Ok(map) = json_to_rhai_map(input) {
@@ -356,6 +363,37 @@ mod tests {
 
         let result = engine.evaluate(policy, &ctx);
         assert_eq!(result.unwrap(), true);
+    }
+    
+    #[test]
+    fn test_policy_system_owner_keyword() {
+        let engine = PolicyEngine::new();
+        
+        let sub_internal = "internal-123";
+        // Case 1: Is Owner (internal IDs match)
+        let subject = PolicySubject::new("ext-1").with_internal_id(sub_internal.to_string());
+        let resource = Resource::instance("doc", "doc-1");
+        let env = PolicyEnv::new(0);
+        let ctx = PolicyContext::new(subject, resource, "read", env.clone())
+            .with_resource_owner(sub_internal.to_string());
+            
+        assert!(engine.evaluate("owner", &ctx).unwrap());
+        
+        // Case 2: Not Owner (mismatch)
+        let subject_fail = PolicySubject::new("ext-2").with_internal_id("other-id".to_string());
+        let resource_fail = Resource::instance("doc", "doc-1");
+        let ctx_fail = PolicyContext::new(subject_fail, resource_fail, "read", env.clone())
+            .with_resource_owner(sub_internal.to_string());
+            
+        assert_eq!(engine.evaluate("owner", &ctx_fail).unwrap(), false);
+        
+        // Case 3: No Internal ID (provision failure)
+        let subject_no_int = PolicySubject::new("ext-3");
+        let resource_no = Resource::instance("doc", "doc-1");
+        let ctx_no = PolicyContext::new(subject_no_int, resource_no, "read", env)
+            .with_resource_owner(sub_internal.to_string());
+            
+         assert_eq!(engine.evaluate("owner", &ctx_no).unwrap(), false);
     }
 
     // ==================== Error Handling Tests ====================
