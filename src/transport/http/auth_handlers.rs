@@ -3,7 +3,7 @@
 //! # Endpoints
 //!
 //! - POST /auth/login - authenticate user
-//! - POST /auth/register - create new user
+//! - POST /auth/register - create new user (with bootstrap enforcement)
 //! - POST /auth/logout - revoke session
 
 use axum::{
@@ -57,6 +57,8 @@ impl IntoResponse for AuthError {
             AuthError::SessionRevoked => (StatusCode::UNAUTHORIZED, "SESSION_REVOKED"),
             AuthError::SessionNotFound => (StatusCode::UNAUTHORIZED, "SESSION_NOT_FOUND"),
             AuthError::SessionKeyMismatch => (StatusCode::UNAUTHORIZED, "SESSION_KEY_MISMATCH"),
+            // SECURITY: Same error for both bootstrap states (prevents oracle attacks)
+            AuthError::BootstrapRequired => (StatusCode::FORBIDDEN, "BOOTSTRAP_REQUIRED"),
             AuthError::Password(_) => (StatusCode::INTERNAL_SERVER_ERROR, "PASSWORD_ERROR"),
             AuthError::Storage(_) => (StatusCode::INTERNAL_SERVER_ERROR, "STORAGE_ERROR"),
             AuthError::Jwt(_) => (StatusCode::INTERNAL_SERVER_ERROR, "JWT_ERROR"),
@@ -81,12 +83,55 @@ pub async fn handle_login(
 }
 
 /// POST /auth/register
+/// 
+/// # Bootstrap Enforcement
+/// 
+/// If no internal users exist (bootstrap mode):
+/// - Requires `bootstrap_code` field
+/// - If code is correct: user becomes admin
+/// - If code is wrong/missing: returns 403
+/// 
+/// After bootstrap:
+/// - `bootstrap_code` is ignored
+/// - User always gets "user" role
 pub async fn handle_register(
     State(state): State<AppState>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<Json<AuthResponse>, AuthError> {
-    let response = state.identity_service().register(state.sqlite_state(), req)?;
-    Ok(Json(response.into()))
+    let is_bootstrap = !state.is_bootstrap_complete();
+
+    if is_bootstrap {
+        // Bootstrap mode: require and verify code
+        let code_valid = match &req.bootstrap_code {
+            Some(code) => state.verify_bootstrap_code(code),
+            None => false,
+        };
+
+        if !code_valid {
+            // Log the attempt server-side
+            tracing::warn!(
+                username = %req.username,
+                has_code = req.bootstrap_code.is_some(),
+                "Bootstrap registration failed: invalid or missing code"
+            );
+            return Err(AuthError::BootstrapRequired);
+        }
+
+        // Valid bootstrap code: create admin
+        let roles = vec!["admin".to_string()];
+        let response = state.identity_service()
+            .register_with_roles(state.sqlite_state(), req, roles)?;
+
+        // CRITICAL: Complete bootstrap (clears code permanently)
+        state.complete_bootstrap();
+
+        tracing::info!("Bootstrap complete: first admin registered");
+        Ok(Json(response.into()))
+    } else {
+        // Normal registration: user role
+        let response = state.identity_service().register(state.sqlite_state(), req)?;
+        Ok(Json(response.into()))
+    }
 }
 
 /// POST /auth/logout

@@ -52,13 +52,17 @@ async fn test_http_transport_flow() {
         jwt_secret.to_vec(),
     );
 
+    // Get bootstrap code for first registration
+    let bootstrap_code = app_state.get_bootstrap_code_for_test().unwrap();
+
     let app = app(app_state);
 
     // 2. Register a user (this creates a real session)
     let register_body = json!({
         "username": "testuser",
         "password": "testpassword123",
-        "device_name": "e2e-test"
+        "device_name": "e2e-test",
+        "bootstrap_code": bootstrap_code
     });
 
     let register_req = Request::builder()
@@ -157,12 +161,16 @@ async fn test_logout_revokes_session() {
         jwt_secret.to_vec(),
     );
 
+    // Get bootstrap code for first registration
+    let bootstrap_code = app_state.get_bootstrap_code_for_test().unwrap();
+
     let app = app(app_state);
 
     // 1. Register and get JWT
     let register_body = json!({
         "username": "logoutuser",
-        "password": "testpassword123"
+        "password": "testpassword123",
+        "bootstrap_code": bootstrap_code
     });
 
     let register_req = Request::builder()

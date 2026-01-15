@@ -81,12 +81,14 @@ async fn test_grpc_transport_flow() {
     );
 
     // 2. Get a real JWT via HTTP register (need to start HTTP for this)
+    let bootstrap_code = app_state.get_bootstrap_code_for_test().unwrap();
     let http_app = app(app_state.clone());
     
     let register_body = json!({
         "username": "grpcuser",
         "password": "testpassword123",
-        "device_name": "grpc-test"
+        "device_name": "grpc-test",
+        "bootstrap_code": bootstrap_code
     });
 
     let register_req = AxumRequest::builder()
