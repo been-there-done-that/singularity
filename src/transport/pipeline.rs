@@ -265,7 +265,27 @@ fn process_data_request(
              (planner::plan_insert(model_name, &input, &*app.sqlite_state())
                 .map_err(|e| TransportError::BadRequest(e.to_string()))?, DataAction::Insert)
         },
-        // TODO: Update/Delete
+        DATA_UPDATE => {
+             let mut input: UpdateInput = serde_json::from_value(input_value)
+                .map_err(|e| TransportError::BadRequest(format!("invalid update input: {}", e)))?;
+
+             // Inject updated_at
+             if let serde_json::Value::Object(ref mut map) = input.set {
+                 if !map.contains_key("updated_at") {
+                     map.insert("updated_at".into(), serde_json::json!(now));
+                 }
+             }
+
+             (planner::plan_update(model_name, &input, &*app.sqlite_state())
+                .map_err(|e| TransportError::BadRequest(e.to_string()))?, DataAction::Update)
+        },
+        DATA_DELETE => {
+             let input: DeleteInput = serde_json::from_value(input_value)
+                .map_err(|e| TransportError::BadRequest(format!("invalid delete input: {}", e)))?;
+             
+             (planner::plan_delete(model_name, &input, &*app.sqlite_state())
+                .map_err(|e| TransportError::BadRequest(e.to_string()))?, DataAction::Delete)
+        },
         _ => return Err(TransportError::BadRequest(format!("unsupported data op: {}", request.op))),
     };
 
