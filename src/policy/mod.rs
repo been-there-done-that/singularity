@@ -36,7 +36,7 @@
 mod context;
 mod engine;
 mod error;
-mod plan_authorizer;
+pub mod plan_authorizer;
 mod sandbox;
 
 pub use context::{PolicyContext, PolicyEnv, PolicySubject};
