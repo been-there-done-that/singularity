@@ -96,6 +96,16 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                 if let Some(user_id) = ctx.internal_user_id() {
                      exec_constraints.insert("owner_id".to_string(), serde_json::json!(user_id));
                 }
+                
+                // Merge with detailed constraints from payload
+                if let Some(p) = payload {
+                    if let Some(obj) = p.as_object() {
+                        for (k, v) in obj {
+                            exec_constraints.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+
                 // Merge with explicit constraints if any (future proofing)
                 let c_val = if !exec_constraints.is_empty() {
                     Some(serde_json::Value::Object(exec_constraints))
@@ -119,6 +129,13 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                 let mut exec_constraints = serde_json::Map::new();
                 if let Some(user_id) = ctx.internal_user_id() {
                      exec_constraints.insert("owner_id".to_string(), serde_json::json!(user_id));
+                }
+                if let Some(p) = payload {
+                    if let Some(obj) = p.as_object() {
+                        for (k, v) in obj {
+                            exec_constraints.insert(k.clone(), v.clone());
+                        }
+                    }
                 }
                 let c_val = if !exec_constraints.is_empty() {
                     Some(serde_json::Value::Object(exec_constraints))
@@ -417,6 +434,13 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                 let mut exec_constraints = serde_json::Map::new();
                 if let Some(user_id) = ctx.internal_user_id() {
                      exec_constraints.insert("owner_id".to_string(), serde_json::json!(user_id));
+                }
+                if let Some(p) = payload {
+                    if let Some(obj) = p.as_object() {
+                        for (k, v) in obj {
+                            exec_constraints.insert(k.clone(), v.clone());
+                        }
+                    }
                 }
                 let c_val = if !exec_constraints.is_empty() {
                     Some(serde_json::Value::Object(exec_constraints))

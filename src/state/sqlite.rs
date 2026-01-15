@@ -829,35 +829,95 @@ impl State for SqliteState {
                 }
 
                 let conn = self.conn.lock().unwrap();
-                // Collection read
-                let mut stmt = conn.prepare(
-                    "SELECT resource_id, data, version, deleted FROM resources 
-                     WHERE resource_type = ?1 AND deleted = 0"
-                ).map_err(|e| StateError::InternalError(e.to_string()))?;
+                
+                // 1. Determine Source (Physical vs Resources)
+                let is_model_defined: bool = conn.query_row(
+                    "SELECT 1 FROM __models WHERE name = ?1",
+                    params![resource_type],
+                    |_| Ok(true),
+                ).unwrap_or(false);
 
-                let rows = stmt.query_map(params![resource_type], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                }).map_err(|e| StateError::InternalError(e.to_string()))?;
+                let mut results: Vec<Value> = if is_model_defined {
+                     let table_name = quote_identifier(&resource_type);
+                     let sql = format!("SELECT * FROM {}", table_name);
+                     
+                     let mut stmt = conn.prepare(&sql).map_err(|e| StateError::InternalError(e.to_string()))?;
+                     let col_names: Vec<String> = stmt.column_names().into_iter().map(|s| s.to_string()).collect();
+                     
+                     let rows = stmt.query_map([], |row| {
+                         let mut map = serde_json::Map::new();
+                         for (i, col_name) in col_names.iter().enumerate() {
+                             let val_ref = row.get_ref(i)?;
+                             // Simple mapping (same as instance read)
+                             let val = match val_ref {
+                                 rusqlite::types::ValueRef::Null => Value::Null,
+                                 rusqlite::types::ValueRef::Integer(i) => json!(i),
+                                 rusqlite::types::ValueRef::Real(r) => json!(r),
+                                 rusqlite::types::ValueRef::Text(t) => {
+                                     let s = std::str::from_utf8(t).unwrap_or("");
+                                      json!(s)
+                                 },
+                                 rusqlite::types::ValueRef::Blob(_) => json!("<blob>"), 
+                             };
+                             map.insert(col_name.clone(), val);
+                         }
+                         Ok(Value::Object(map))
+                     }).map_err(|e| StateError::InternalError(e.to_string()))?;
 
-                let mut results = Vec::new();
-                for row in rows {
-                    let (id, data_str, version) = row.map_err(|e| StateError::InternalError(e.to_string()))?;
-                    let mut data: Value = serde_json::from_str(&data_str)
-                        .map_err(|e| StateError::InternalError(e.to_string()))?;
-                    
-                    if let Some(obj) = data.as_object_mut() {
-                        obj.insert("_id".to_string(), json!(id));
-                        obj.insert("_version".to_string(), json!(version));
+                     rows.filter_map(Result::ok).collect()
+                } else {
+                     let mut stmt = conn.prepare(
+                        "SELECT resource_id, data, version, deleted FROM resources 
+                         WHERE resource_type = ?1 AND deleted = 0"
+                    ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+                    let rows = stmt.query_map(params![resource_type], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    }).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+                    let mut items = Vec::new();
+                    for row in rows {
+                        if let Ok((id, data_str, version)) = row {
+                            if let Ok(mut data) = serde_json::from_str::<Value>(&data_str) {
+                                if let Some(obj) = data.as_object_mut() {
+                                    obj.insert("_id".to_string(), json!(id));
+                                    obj.insert("_version".to_string(), json!(version));
+                                }
+                                items.push(data);
+                            }
+                        }
                     }
-                    
-                    results.push(Self::filter_fields(data, fields));
+                    items
+                };
+
+                // 2. In-Memory Filtering
+                if let Some(c) = constraints {
+                    if let Some(obj) = c.as_object() {
+                        results.retain(|item| {
+                            for (k, v) in obj {
+                                // Specific CAS handlers
+                                if k == "version_eq" || k == "not_deleted" || k == "exists" { continue; }
+                                
+                                // Direct match
+                                if item.get(k) != Some(v) {
+                                    return false;
+                                }
+                            }
+                            true
+                        });
+                    }
                 }
 
-                Ok(Value::Array(results))
+                // 3. Field Filtering
+                let filtered: Vec<Value> = results.into_iter()
+                    .map(|v| Self::filter_fields(v, fields))
+                    .collect();
+
+                Ok(Value::Array(filtered))
             }
         }
     }
