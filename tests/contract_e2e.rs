@@ -16,7 +16,7 @@ use std::sync::Arc;
 use singularity::capability::{CapabilitySigner, SigningKey};
 use singularity::identity::JwtVerifier;
 use singularity::policy::PolicyEngine;
-use singularity::protocol::{OpRequest, OpExecute, Resource, CapGrant};
+use singularity::protocol::{OpRequest, OpExecute, Resource, CapGrant, opcode::*};
 use singularity::state::SqliteState;
 use singularity::transport::AppState;
 use singularity::transport::http::app;
@@ -123,7 +123,7 @@ async fn test_resource_count() {
     // Target __models collection for model creation
     let create_model_req = OpRequest::new(
         "req-1",
-        "schema.create_model", 
+        SCHEMA_CREATE_MODEL, 
         Resource::collection("__models"), 
         0
     ).with_input(json!({
@@ -166,7 +166,7 @@ async fn test_resource_count() {
     // Need capability for resource.count on posts
     let count_req = OpRequest::new(
         "req-2",
-        "resource.count",
+        RESOURCE_COUNT,
         Resource::collection("posts"),
         0
     );
@@ -205,7 +205,7 @@ async fn test_schema_rename() {
     let token = register_admin(app.clone(), &code).await;
 
     // 1. Create Model "todos"
-    let create_req = OpRequest::new("req-1", "schema.create_model", Resource::collection("__models"), 0)
+    let create_req = OpRequest::new("req-1", SCHEMA_CREATE_MODEL, Resource::collection("__models"), 0)
         .with_input(json!({"name": "todos", "fields": [{"name": "desc", "type": "text"}]}));
         
     let req = Request::builder().uri("/v1/op/request").method("POST").header("Content-Type", "application/json").header("Authorization", format!("Bearer {}", token)).body(Body::from(serde_json::to_string(&create_req).unwrap())).unwrap();
@@ -218,7 +218,7 @@ async fn test_schema_rename() {
 
     // 2. Rename usage "todos" -> "tasks"
     // Target can be __models collection or instance. Rename is often on collection/system.
-    let rename_req = OpRequest::new("req-2", "schema.rename_model", Resource::collection("__models"), 0);
+    let rename_req = OpRequest::new("req-2", SCHEMA_RENAME_MODEL, Resource::collection("__models"), 0);
 
     let req = Request::builder().uri("/v1/op/request").method("POST").header("Content-Type", "application/json").header("Authorization", format!("Bearer {}", token)).body(Body::from(serde_json::to_string(&rename_req).unwrap())).unwrap();
     let resp = tower::util::ServiceExt::oneshot(app.clone(), req).await.unwrap();
@@ -232,7 +232,7 @@ async fn test_schema_rename() {
 
     // 3. Verify Original is Gone (Count on "todos" fails or returns error/0)
     // 4. Verify New exists (Count tasks)
-    let count_req = OpRequest::new("req-3", "resource.count", Resource::collection("tasks"), 0);
+    let count_req = OpRequest::new("req-3", RESOURCE_COUNT, Resource::collection("tasks"), 0);
     // Request cap
     let req = Request::builder().uri("/v1/op/request").method("POST").header("Content-Type", "application/json").header("Authorization", format!("Bearer {}", token)).body(Body::from(serde_json::to_string(&count_req).unwrap())).unwrap();
     let resp = tower::util::ServiceExt::oneshot(app.clone(), req).await.unwrap();
