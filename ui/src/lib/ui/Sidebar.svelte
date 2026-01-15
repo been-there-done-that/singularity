@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { auth } from '$lib/state/auth.svelte';
+	import { auth, clearAuth } from '$lib/state/auth.svelte';
+	import { goto } from '$app/navigation';
 
 	interface NavItem {
 		label: string;
@@ -18,8 +19,8 @@
 		{
 			label: 'Schema',
 			href: '/schema',
-			icon: `<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />`,
-			adminOnly: true
+			icon: `<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />`
+			// Schema visible to all authenticated users
 		},
 		{
 			label: 'Data',
@@ -56,6 +57,11 @@
 			return page.url.pathname === '/';
 		}
 		return page.url.pathname.startsWith(href);
+	}
+
+	function handleLogout() {
+		clearAuth();
+		goto('/login');
 	}
 </script>
 
@@ -114,10 +120,24 @@
 					</svg>
 				</div>
 				<div class="flex-1 min-w-0">
-					<p class="text-sm font-medium text-white truncate">Admin</p>
-					<p class="text-xs text-zinc-500">Logged in</p>
+					<p class="text-sm font-medium text-white truncate">
+						{auth.isAdmin ? 'Admin' : 'User'}
+					</p>
+					<p class="text-xs text-zinc-500 truncate">{auth.subject?.id?.slice(0, 20)}...</p>
 				</div>
 			</div>
+			<!-- Logout Button -->
+			<button
+				onclick={handleLogout}
+				class="mt-2 w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium
+					   text-zinc-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+			>
+				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" 
+						d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+				</svg>
+				Logout
+			</button>
 		</div>
 	{/if}
 </aside>
