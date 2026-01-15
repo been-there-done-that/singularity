@@ -11,6 +11,10 @@ use crate::protocol::{CapabilityPayload, FieldSet, OpExecute, OpRequest, CapGran
 use crate::transport::error::TransportError;
 use crate::transport::AppState;
 use crate::state::State;
+use crate::planner;
+use crate::executor as pap_executor;
+use crate::protocol::data::{QueryInput, InsertInput, UpdateInput, DeleteInput, DataAction};
+
 
 // ============================================================================
 // Internal Authorization Types (NOT EXPOSED)
@@ -82,7 +86,7 @@ fn evaluate_policy(
 /// Pipeline:
 /// 1. Identity Verification (JWT)
 /// 2. Session Verification (skh check, revocation check)
-/// 3. Policy Evaluation
+/// 3. Policy Evaluation (or Planner+Policy for data ops)
 /// 4. Capability Minting
 pub fn process_request(
     app: &AppState,
@@ -111,6 +115,13 @@ pub fn process_request(
 
     // Enrich subject with internal_id
     let subject = subject.with_internal_id(internal_id);
+
+    // Branch: Data Ops (PAP) vs Resource Ops (Legacy/Simple)
+    if request.op.starts_with("data.") {
+        return process_data_request(app, subject, request, now);
+    }
+
+    // --- Legacy Resource Pipeline ---
 
     // 3. Ownership Loading
     let mut policy_ctx = PolicyContext::new(
@@ -161,7 +172,7 @@ pub fn process_request(
         return Err(TransportError::PolicyDenied);
     }
 
-    // 3. Capability Minting
+    // 5. Capability Minting
     // Map requested fields -> FieldSet (default ALL logic for v0.1)
     let fields = FieldSet::all(); 
     
@@ -192,6 +203,85 @@ pub fn process_request(
         now + 60,
     ))
 }
+
+/// PAP Pipeline for Data Operations
+fn process_data_request(
+    app: &AppState,
+    subject: crate::policy::PolicySubject, 
+    request: OpRequest,
+    now: u64,
+) -> Result<CapGrant, TransportError> {
+    use crate::protocol::opcode::*;
+
+    let model_name = &request.resource.resource_type;
+    let input_value = request.input.clone().unwrap_or(serde_json::Value::Null);
+
+    // 1. Plan
+    // We only support Query and Count for now properly
+    let (plan, _action) = match request.op.as_str() {
+        DATA_QUERY => {
+            let input: QueryInput = serde_json::from_value(input_value)
+                .map_err(|e| TransportError::BadRequest(format!("invalid query input: {}", e)))?;
+            (planner::plan_query(model_name, &input, app.sqlite_state().as_ref())
+                .map_err(|e| TransportError::BadRequest(e.to_string()))?, DataAction::Query)
+        },
+        DATA_COUNT => {
+            let input: QueryInput = serde_json::from_value(input_value)
+                .map_err(|e| TransportError::BadRequest(format!("invalid query input: {}", e)))?;
+            (planner::plan_count(model_name, &input, app.sqlite_state().as_ref())
+                .map_err(|e| TransportError::BadRequest(e.to_string()))?, DataAction::Count)
+        },
+        DATA_INSERT => {
+             let input: InsertInput = serde_json::from_value(input_value)
+                .map_err(|e| TransportError::BadRequest(format!("invalid insert input: {}", e)))?;
+             (planner::plan_insert(model_name, &input, app.sqlite_state().as_ref())
+                .map_err(|e| TransportError::BadRequest(e.to_string()))?, DataAction::Insert)
+        },
+        // TODO: Update/Delete
+        _ => return Err(TransportError::BadRequest(format!("unsupported data op: {}", request.op))),
+    };
+
+    // 2. Authorize Plan (Policy)
+    // Note: ensure PolicyEngine has authorize_plan method
+    let grant = app.policy.authorize_plan(&subject, &plan)
+        .map_err(|_| TransportError::PolicyDenied)?; 
+
+    // 3. Compute Plan Hash
+    let plan_hash = pap_executor::compute_plan_hash(&plan, &grant);
+
+    // 4. Mint Capability
+    // Store grant as JSON in constraints
+    let constraints = serde_json::to_value(&grant)
+        .map_err(|e| TransportError::Internal(format!("failed to serialize grant: {}", e)))?;
+
+    let mut cap_payload = CapabilityPayload::new(
+        &format!("grant-{}", subject.id),
+        request.op,
+        request.resource,
+        FieldSet::all(), // Plan handles field masking already? Or logic needed?
+        // Actually PlanGrant has field_mask. But Capability fields are usually simple list.
+        // We'll leave Capability fields as All and let PlanExecutor enforce field_mask from Grant.
+        now,
+        now + 60, 
+    )
+    .with_roles(subject.roles.clone())
+    .with_plan_hash(plan_hash)
+    .with_constraints(constraints);
+
+    if let Some(ref iid) = subject.internal_id {
+         cap_payload = cap_payload.with_internal_user_id(iid);
+    }
+
+    let token = app.signer.mint(&cap_payload)
+        .map_err(|e| TransportError::Internal(e.to_string()))?;
+
+    Ok(CapGrant::new(
+        request.request_id,
+        token,
+        now + 60,
+    ))
+}
+
 
 /// Core logic for `Execute` operation.
 ///

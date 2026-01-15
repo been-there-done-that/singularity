@@ -19,6 +19,10 @@ use crate::protocol::opcode::*;
 use super::context::{ExecutionContext, ExecutionMeta, ExecutionTarget};
 use super::executor::OperationExecutor;
 use super::result::{ExecutionError, ExecutionResult};
+use crate::planner;
+use crate::executor as pap_executor;
+use crate::protocol::data::{QueryInput, InsertInput, UpdateInput, DeleteInput, PlanGrant};
+
 
 /// State-backed operation executor.
 ///
@@ -129,7 +133,7 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
             }
 
             SCHEMA_LIST_MODELS => {
-                // Override target to read from __models system table
+                 // Override target to read from __models system table
                 let params = crate::protocol::Resource::collection("__models");
                 let list_target = ExecutionTarget::new(params);
 
@@ -617,6 +621,31 @@ impl<'a, S: State> OperationExecutor for StateBackedExecutor<'a, S> {
                      },
                      Err(e) => Err(ExecutionError::from(e)),
                 }
+            }
+
+            DATA_QUERY | DATA_COUNT => {
+                let payload = payload.ok_or(ExecutionError::BadRequest("Missing query input".into()))?;
+                let input: QueryInput = serde_json::from_value(payload)
+                    .map_err(|e| ExecutionError::BadRequest(e.to_string()))?;
+                let model_name = &target.resource.resource_type;
+                
+                let plan = if op == DATA_QUERY {
+                     planner::plan_query(model_name, &input, self.state)
+                } else {
+                     planner::plan_count(model_name, &input, self.state)
+                }.map_err(|e| ExecutionError::BadRequest(e.to_string()))?;
+
+                let constraints_val = ctx.capability().payload().constraints.as_ref()
+                    .ok_or(ExecutionError::BadRequest("Capacity missing grant constraints".into()))?;
+                let grant: PlanGrant = serde_json::from_value(constraints_val.clone())
+                    .map_err(|e| ExecutionError::BadRequest(format!("Invalid grant in token: {}", e)))?;
+                
+                let expected_hash = ctx.capability().payload().plan_hash.as_deref();
+                pap_executor::verify_plan_hash(expected_hash, &plan, &grant) 
+                     .map_err(|e| ExecutionError::ConstraintViolation { constraint: "plan_hash".into(), reason: e.to_string() })?;
+
+                 self.state.execute_plan(&plan, &grant, ctx.internal_user_id())
+                     .map_err(ExecutionError::from)
             }
 
             // Unknown operation
