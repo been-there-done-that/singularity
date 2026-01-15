@@ -18,6 +18,7 @@ use crate::identity::IdentityError;
 use crate::identity::provider::{
     AuthError, AuthResponse as ServiceAuthResponse, LoginRequest, RegisterRequest,
 };
+use crate::state::State as StateTrait;
 use crate::transport::AppState;
 
 /// HTTP Response for auth endpoints.
@@ -79,6 +80,12 @@ pub async fn handle_login(
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>, AuthError> {
     let response = state.identity_service().login(state.sqlite_state(), req)?;
+    
+    // SYNC to internal users immediately
+    // Note: Roles are not currently returned by login, but ensure_internal_user 
+    // will update them when the first authenticated request happens via pipeline.
+    // For bootstrap, we focus on registration.
+    
     Ok(Json(response.into()))
 }
 
@@ -101,10 +108,18 @@ pub async fn handle_register(
     let is_bootstrap = !state.is_bootstrap_complete();
 
     if is_bootstrap {
+        tracing::info!(username = %req.username, "Processing registration in BOOTSTRAP mode");
         // Bootstrap mode: require and verify code
         let code_valid = match &req.bootstrap_code {
-            Some(code) => state.verify_bootstrap_code(code),
-            None => false,
+            Some(code) => {
+                let valid = state.verify_bootstrap_code(code);
+                tracing::info!(code = %code, valid = %valid, "Bootstrap code verification result");
+                valid
+            },
+            None => {
+                tracing::warn!("Bootstrap code missing in request");
+                false
+            },
         };
 
         if !code_valid {
@@ -120,7 +135,7 @@ pub async fn handle_register(
         // Valid bootstrap code: create admin
         let roles = vec!["admin".to_string()];
         let response = match state.identity_service()
-            .register_with_roles(state.sqlite_state(), req.clone(), roles)
+            .register_with_roles(state.sqlite_state(), req.clone(), roles.clone())
         {
             Ok(res) => res,
             Err(AuthError::UsernameExists) => {
@@ -132,14 +147,26 @@ pub async fn handle_register(
             Err(e) => return Err(e),
         };
 
+        // SYNC to internal users immediately so AppState is aware
+        // Use the same subject format as JWTs: "internal:{auth_user_id}"
+        let external_subject = format!("internal:{}", response.user_id);
+        StateTrait::ensure_internal_user(state.sqlite_state(), &external_subject, &roles)
+            .map_err(|e| AuthError::Storage(format!("provisioning failed: {}", e)))?;
+
         // CRITICAL: Complete bootstrap (clears code permanently)
         state.complete_bootstrap();
 
-        tracing::info!("Bootstrap complete: first admin registered/elevated");
+        tracing::info!("Bootstrap complete: first admin registered/elevated and provisioned");
         Ok(Json(response.into()))
     } else {
         // Normal registration: user role
         let response = state.identity_service().register(state.sqlite_state(), req)?;
+        
+        // SYNC to internal users immediately
+        let external_subject = format!("internal:{}", response.user_id);
+        StateTrait::ensure_internal_user(state.sqlite_state(), &external_subject, &vec!["user".to_string()])
+            .map_err(|e| AuthError::Storage(format!("provisioning failed: {}", e)))?;
+
         Ok(Json(response.into()))
     }
 }
