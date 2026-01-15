@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { auth, clearAuth } from '$lib/state/auth.svelte';
-	import { goto } from '$app/navigation';
+	import { auth } from '$lib/state/auth.svelte';
 
 	interface NavItem {
 		label: string;
@@ -59,9 +58,8 @@
 		return page.url.pathname.startsWith(href);
 	}
 
-	function handleLogout() {
-		clearAuth();
-		goto('/login');
+	async function handleLogout() {
+		await auth.logout();
 	}
 </script>
 
@@ -72,7 +70,7 @@
 	<div class="px-6 py-5 border-b border-zinc-800">
 		<div class="flex items-center gap-3">
 			<div
-				class="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center"
+				class="w-8 h-8 rounded-lg bg-linear-to-br from-indigo-500 to-purple-600 flex items-center justify-center"
 			>
 				<svg class="w-5 h-5 text-white" fill="currentColor" viewBox="0 0 24 24">
 					<path

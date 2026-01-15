@@ -196,12 +196,13 @@ async fn test_logout_revokes_session() {
     assert_eq!(pre_logout_resp.status(), StatusCode::OK, "should work before logout");
 
     // 3. Logout
-    let logout_body = json!({ "session_id": session_id });
+    // let logout_body = json!({ "session_id": session_id });
     let logout_req = Request::builder()
         .uri("/auth/logout")
         .method("POST")
-        .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::to_string(&logout_body).unwrap()))
+        // .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", jwt))
+        .body(Body::empty())
         .unwrap();
 
     let logout_resp = tower::util::ServiceExt::oneshot(app.clone(), logout_req).await.unwrap();
