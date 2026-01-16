@@ -20,8 +20,9 @@
 		deny: 'Denied'
 	};
 
-	function getScopeLabel(scope: string): string {
-		return scopeLabels[scope] ?? scope;
+	function getScopeLabel(scope: {type: string} | string): string {
+		const scopeType = typeof scope === 'string' ? scope : scope?.type ?? 'unknown';
+		return scopeLabels[scopeType] ?? scopeType;
 	}
 
 	function formatDate(ts: number): string {
