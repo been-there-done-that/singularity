@@ -16,6 +16,7 @@
 
 mod access_config;
 mod access_ops;
+mod constraint_types;
 mod filter;
 mod grant;
 mod mutation;
@@ -25,6 +26,10 @@ pub use access_config::{AccessProfile, PrincipalType, RowScopeType, ScopeSource}
 pub use access_ops::{
     AccessProfileError, AccessProfileInput, AccessProfileListOutput, AccessProfileOutput,
     AccessProfileUpdate,
+};
+pub use constraint_types::{
+    CompareOp, ConstraintViolation, OperationConstraint,
+    field_is_present, get_array_length, validate_constraints,
 };
 pub use filter::{FilterOp, FilterValidationError, FilterValue};
 pub use grant::{

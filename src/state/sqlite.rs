@@ -2279,6 +2279,79 @@ impl State for SqliteState {
 
         Ok(())
     }
+
+    // =========================================================================
+    // Operation Constraints CRUD
+    // =========================================================================
+
+    fn list_operation_constraints(
+        &self,
+        model_id: &str,
+        action: &str,
+    ) -> Result<Vec<crate::protocol::data::OperationConstraint>, StateError> {
+        let conn = self.conn.lock().unwrap();
+        
+        let mut stmt = conn.prepare(
+            "SELECT constraint_json FROM __operation_constraints 
+             WHERE model_id = ?1 AND action = ?2"
+        ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        let constraints = stmt.query_map(params![model_id, action], |row| {
+            let json_str: String = row.get(0)?;
+            Ok(json_str)
+        }).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        let mut result = Vec::new();
+        for json_result in constraints {
+            let json_str = json_result.map_err(|e| StateError::InternalError(e.to_string()))?;
+            let constraint: crate::protocol::data::OperationConstraint = 
+                serde_json::from_str(&json_str)
+                    .map_err(|e| StateError::InternalError(format!("failed to parse constraint: {}", e)))?;
+            result.push(constraint);
+        }
+
+        Ok(result)
+    }
+
+    fn create_operation_constraint(
+        &self,
+        model_id: &str,
+        action: &str,
+        constraint: &crate::protocol::data::OperationConstraint,
+        now: u64,
+    ) -> Result<String, StateError> {
+        let conn = self.conn.lock().unwrap();
+        
+        let id = uuid::Uuid::new_v4().to_string();
+        let constraint_json = serde_json::to_string(constraint)
+            .map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        conn.execute(
+            "INSERT INTO __operation_constraints (id, model_id, action, constraint_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![id, model_id, action, constraint_json, now as i64],
+        ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        Ok(id)
+    }
+
+    fn delete_operation_constraint(&self, id: &str) -> Result<(), StateError> {
+        let conn = self.conn.lock().unwrap();
+        
+        let affected = conn.execute(
+            "DELETE FROM __operation_constraints WHERE id = ?1",
+            params![id],
+        ).map_err(|e| StateError::InternalError(e.to_string()))?;
+
+        if affected == 0 {
+            return Err(StateError::NotFound {
+                resource_type: "__operation_constraints".into(),
+                resource_id: id.into(),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 use crate::planner::{SchemaView, ModelRef, FieldRef, FieldType, RelationRef};

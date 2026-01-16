@@ -202,6 +202,29 @@ pub trait State: SchemaView + Send + Sync {
     /// Delete an access profile.
     fn delete_access_profile(&self, id: &str) -> Result<(), StateError>;
 
+    // =========================================================================
+    // Operation Constraints CRUD
+    // =========================================================================
+
+    /// List operation constraints for a model and action.
+    fn list_operation_constraints(
+        &self,
+        model_id: &str,
+        action: &str, // "create" or "update"
+    ) -> Result<Vec<crate::protocol::data::OperationConstraint>, StateError>;
+
+    /// Create an operation constraint.
+    fn create_operation_constraint(
+        &self,
+        model_id: &str,
+        action: &str,
+        constraint: &crate::protocol::data::OperationConstraint,
+        now: u64,
+    ) -> Result<String, StateError>;
+
+    /// Delete an operation constraint.
+    fn delete_operation_constraint(&self, id: &str) -> Result<(), StateError>;
+
 }
 
 #[cfg(test)]

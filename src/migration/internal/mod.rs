@@ -5,6 +5,7 @@ pub mod v3_auth;
 pub mod v4_index_ownership;
 pub mod v5_rls;
 pub mod v6_row_scopes_insert;
+pub mod v7_operation_constraints;
 
 pub use v0_bootstrap::V0Bootstrap;
 pub use v1_schema_meta::V1SchemaMeta;
@@ -13,4 +14,5 @@ pub use v3_auth::V3Auth;
 pub use v4_index_ownership::V4IndexOwnership;
 pub use v5_rls::V5Rls;
 pub use v6_row_scopes_insert::V6RowScopesInsert;
+pub use v7_operation_constraints::V7OperationConstraints;
 

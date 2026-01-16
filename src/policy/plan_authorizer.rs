@@ -483,6 +483,67 @@ impl PlanAuthorizer {
         })
     }
 
+    /// Apply operation constraints to a mutation plan.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The LogicalPlan (must be Insert or Update)
+    /// * `constraints` - The operation constraints from the database
+    /// * `existing_record` - For updates, the existing record data
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Constraints satisfied
+    /// * `Err(AuthorizationError::InvalidPlan)` - Constraint violated (400)
+    pub fn apply_operation_constraints(
+        &self,
+        plan: &LogicalPlan,
+        constraints: &[crate::protocol::data::OperationConstraint],
+        existing_record: Option<&serde_json::Value>,
+    ) -> Result<(), AuthorizationError> {
+        use crate::protocol::data::{validate_constraints, DataAction};
+        use crate::planner::MutationPlan;
+
+        // Only applies to insert and update
+        let is_update = match plan.action {
+            DataAction::Insert => false,
+            DataAction::Update => true,
+            _ => return Ok(()), // Constraints don't apply to query/delete/count
+        };
+
+        // Extract request body from mutation plan
+        let body = match &plan.mutation {
+            Some(MutationPlan::Insert { rows, .. }) => {
+                // For insert, validate first row (bulk inserts validate each)
+                if let Some(first) = rows.first() {
+                    first.data.clone()
+                } else {
+                    return Ok(()); // Empty insert, no constraints to check
+                }
+            }
+            Some(MutationPlan::Update { set, .. }) => {
+                // Build a JSON object from the update set
+                let mut body = serde_json::Map::new();
+                for (field, value) in set {
+                    body.insert(field.name.clone(), value.clone());
+                }
+                serde_json::Value::Object(body)
+            }
+            _ => return Ok(()), // No mutation data
+        };
+
+        // Validate constraints
+        match validate_constraints(constraints, &body, existing_record, is_update) {
+            Ok(()) => Ok(()),
+            Err(violation) => Err(AuthorizationError::InvalidPlan {
+                reason: format!(
+                    "constraint violation: {} (field: {})",
+                    violation.message, violation.field
+                ),
+            }),
+        }
+    }
+
     /// Check if the subject has admin role.
     fn is_admin(&self, ctx: &PlanAuthContext) -> bool {
         ctx.subject
