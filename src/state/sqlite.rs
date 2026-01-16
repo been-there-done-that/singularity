@@ -2049,14 +2049,13 @@ impl State for SqliteState {
         for (opcode, scope) in &input.row_scopes {
             let scope_str = scope.to_db_str();
             conn.execute(
-                "INSERT INTO __row_scopes (id, access_profile_id, opcode, scope_type, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                "INSERT INTO __row_scopes (id, access_profile_id, opcode, scope_type)
+                 VALUES (?1, ?2, ?3, ?4)",
                 params![
                     uuid::Uuid::new_v4().to_string(),
                     id,
                     opcode,
                     scope_str,
-                    now as i64,
                 ],
             ).map_err(|e| StateError::InternalError(e.to_string()))?;
         }
@@ -2240,16 +2239,15 @@ impl State for SqliteState {
             
             // Upsert scope
             conn.execute(
-                "INSERT INTO __row_scopes (id, access_profile_id, opcode, scope_type, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+                "INSERT INTO __row_scopes (id, access_profile_id, opcode, scope_type)
+                 VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(access_profile_id, opcode) DO UPDATE SET 
-                 scope_type = excluded.scope_type, updated_at = excluded.updated_at",
+                 scope_type = excluded.scope_type",
                 params![
                     uuid::Uuid::new_v4().to_string(),
                     id,
                     opcode,
                     scope_str,
-                    now as i64,
                 ],
             ).map_err(|e| StateError::InternalError(e.to_string()))?;
         }

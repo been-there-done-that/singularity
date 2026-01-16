@@ -106,13 +106,13 @@ async fn test_http_transport_flow() {
     let body_bytes = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
     let grant: CapGrant = serde_json::from_slice(&body_bytes).unwrap();
     
-    assert!(!grant.token.as_str().is_empty());
+    assert!(!grant.token.as_ref().unwrap().as_str().is_empty());
     assert_eq!(grant.request_id, "req-1");
 
     // 4. Execute Operation (/v1/op/execute)
     let op_exec = OpExecute::new(
         "exec-1",
-        grant.token,
+        grant.token.unwrap(),
         now,
     ).with_payload(json!({"title": "HTTP Test", "content": "Via Axum"}));
 
