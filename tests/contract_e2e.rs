@@ -146,7 +146,7 @@ async fn test_resource_count() {
     let grant: CapGrant = serde_json::from_slice(&bytes).unwrap();
 
     // Execute Create
-    let exec = OpExecute::new("exec-1", grant.token, 0)
+    let exec = OpExecute::new("exec-1", grant.token.unwrap(), 0)
         .with_payload(json!({
             "name": "posts",
             "fields": [{"name": "title", "type": "text"}]
@@ -184,7 +184,7 @@ async fn test_resource_count() {
     let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
     let grant: CapGrant = serde_json::from_slice(&bytes).unwrap();
 
-    let exec = OpExecute::new("exec-2", grant.token, 0);
+    let exec = OpExecute::new("exec-2", grant.token.unwrap(), 0);
     let req = Request::builder()
         .uri("/v1/op/execute")
         .method("POST")
@@ -212,7 +212,7 @@ async fn test_schema_rename() {
     let resp = tower::util::ServiceExt::oneshot(app.clone(), req).await.unwrap();
     let grant: CapGrant = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1024).await.unwrap()).unwrap();
     
-    let exec = OpExecute::new("exec-1", grant.token, 0).with_payload(json!({"name": "todos", "fields": [{"name": "desc", "type": "text"}]}));
+    let exec = OpExecute::new("exec-1", grant.token.unwrap(), 0).with_payload(json!({"name": "todos", "fields": [{"name": "desc", "type": "text"}]}));
     let req = Request::builder().uri("/v1/op/execute").method("POST").header("Content-Type", "application/json").body(Body::from(serde_json::to_string(&exec).unwrap())).unwrap();
     tower::util::ServiceExt::oneshot(app.clone(), req).await.unwrap();
 
@@ -224,7 +224,7 @@ async fn test_schema_rename() {
     let resp = tower::util::ServiceExt::oneshot(app.clone(), req).await.unwrap();
     let grant: CapGrant = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1024).await.unwrap()).unwrap();
 
-    let exec = OpExecute::new("exec-2", grant.token, 0).with_payload(json!({"old_name": "todos", "new_name": "tasks"}));
+    let exec = OpExecute::new("exec-2", grant.token.unwrap(), 0).with_payload(json!({"old_name": "todos", "new_name": "tasks"}));
     let req = Request::builder().uri("/v1/op/execute").method("POST").header("Content-Type", "application/json").body(Body::from(serde_json::to_string(&exec).unwrap())).unwrap();
     let resp = tower::util::ServiceExt::oneshot(app.clone(), req).await.unwrap();
     
@@ -239,7 +239,7 @@ async fn test_schema_rename() {
     let grant: CapGrant = serde_json::from_slice(&axum::body::to_bytes(resp.into_body(), 1024).await.unwrap()).unwrap();
 
     // Execute count
-    let exec = OpExecute::new("exec-3", grant.token, 0);
+    let exec = OpExecute::new("exec-3", grant.token.unwrap(), 0);
     let req = Request::builder().uri("/v1/op/execute").method("POST").header("Content-Type", "application/json").body(Body::from(serde_json::to_string(&exec).unwrap())).unwrap();
     let resp = tower::util::ServiceExt::oneshot(app.clone(), req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
