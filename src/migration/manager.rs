@@ -20,6 +20,7 @@ impl MigrationManager {
                 Box::new(internal::V3Auth),
                 Box::new(internal::V4IndexOwnership),
                 Box::new(internal::V5Rls),
+                Box::new(internal::V6RowScopesInsert),
             ],
         }
     }
