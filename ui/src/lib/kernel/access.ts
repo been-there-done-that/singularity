@@ -19,7 +19,7 @@ export interface AccessProfile {
     allow_update: boolean;
     allow_delete: boolean;
     priority: number;
-    row_scopes: Record<string, string>;
+    row_scopes: Record<string, { type: string }>;
     created_at: number;
     updated_at: number;
 }
@@ -33,7 +33,7 @@ export interface AccessProfileInput {
     allow_update?: boolean;
     allow_delete?: boolean;
     priority?: number;
-    row_scopes?: Record<string, string>;
+    row_scopes?: Record<string, { type: string }>;
 }
 
 export interface AccessProfileUpdate {
@@ -43,7 +43,7 @@ export interface AccessProfileUpdate {
     allow_update?: boolean;
     allow_delete?: boolean;
     priority?: number;
-    row_scopes?: Record<string, string>;
+    row_scopes?: Record<string, { type: string }>;
 }
 
 export interface AccessProfileListResponse {
