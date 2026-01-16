@@ -25,11 +25,14 @@
 	let allow_delete = $state(profile?.allow_delete ?? false);
 	let priority = $state(profile?.priority ?? 0);
 
-	// Row scopes (simplified: same scope for all ops)
-	let query_scope = $state<string>(profile?.row_scopes?.query ?? 'owner');
-	let insert_scope = $state<string>(profile?.row_scopes?.insert ?? 'owner');
-	let update_scope = $state<string>(profile?.row_scopes?.update ?? 'owner');
-	let delete_scope = $state<string>(profile?.row_scopes?.delete ?? 'owner');
+	// Row scopes - extract 'type' field from {type: string} objects
+	function getScopeType(scope: {type: string} | undefined): string {
+		return scope?.type ?? 'owner';
+	}
+	let query_scope = $state<string>(getScopeType(profile?.row_scopes?.query));
+	let insert_scope = $state<string>(getScopeType(profile?.row_scopes?.insert));
+	let update_scope = $state<string>(getScopeType(profile?.row_scopes?.update));
+	let delete_scope = $state<string>(getScopeType(profile?.row_scopes?.delete));
 
 	let saving = $state(false);
 	let error = $state<string | null>(null);
@@ -40,11 +43,12 @@
 		error = null;
 
 		try {
-			const row_scopes: Record<string, string> = {};
-			if (allow_query) row_scopes.query = query_scope;
-			if (allow_insert) row_scopes.insert = insert_scope;
-			if (allow_update) row_scopes.update = update_scope;
-			if (allow_delete) row_scopes.delete = delete_scope;
+			// Build row_scopes with tagged enum format: {"type": "owner"}
+			const row_scopes: Record<string, {type: string}> = {};
+			if (allow_query) row_scopes.query = { type: query_scope };
+			if (allow_insert) row_scopes.insert = { type: insert_scope };
+			if (allow_update) row_scopes.update = { type: update_scope };
+			if (allow_delete) row_scopes.delete = { type: delete_scope };
 
 			if (isCreating) {
 				const input: AccessProfileInput = {
